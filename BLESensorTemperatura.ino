@@ -6,9 +6,18 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
+#include "esp_sleep.h"
+#include "esp_bt.h"
+#include "esp_wifi.h"
 
 //BLE server name
 #define bleServerName "HX711_ESP32"
+
+// Configuración de ahorro de energía
+#define DEEP_SLEEP_TIME_OFFLINE 900 // 15 minutos en segundos
+#define LIGHT_SLEEP_TIME_CONNECTED 5 // 5 segundos cuando conectado
+#define CPU_FREQ_LOW 80 // MHz para bajo consumo
+#define CPU_FREQ_NORMAL 240 // MHz para operación normal
 
 // Pin de datos y de reloj para HX711
 byte pinData = 4;
@@ -23,11 +32,13 @@ float factor_calibracion = 25000.0;  //Factor de calibracion
 float peso;
 float pitch, roll; // Variables para inclinación
 
+// Variables de estado de energía
+bool sensorsInitialized = false;
+bool bleActive = false;
+
 // Timer variables
 unsigned long lastTime = 0;
 unsigned long timerDelay = 30000; // 30 segundos
-unsigned long lastInclinationTime = 0;
-unsigned long inclinationTimerDelay = 10000; // 10 segundos para inclinación
 unsigned long lastOfflineTime = 0;
 unsigned long offlineTimerDelay = 900000; // 15 minutos (15 * 60 * 1000 ms)
 unsigned long initialOfflineDelay = 900000; // 15 minutos inicial
@@ -55,28 +66,36 @@ bool deviceConnected = false;
 
 // Weight Characteristic and Descriptor (includes timestamp)
 BLECharacteristic weightCharacteristics("cba1d466-344c-4be3-ab3f-189f80dd7518", BLECharacteristic::PROPERTY_NOTIFY);
-BLEDescriptor weightDescriptor(BLEUUID((uint16_t)0x2902));
+BLEDescriptor weightDescriptor(BLEUUID((uint16_t)0x2902)); // Client Characteristic Configuration
 
 // Offline Data Characteristic and Descriptor
 BLECharacteristic offlineDataCharacteristics("87654321-4321-4321-4321-cba987654321", BLECharacteristic::PROPERTY_NOTIFY);
-BLEDescriptor offlineDataDescriptor(BLEUUID((uint16_t)0x2904));
+BLEDescriptor offlineDataDescriptor(BLEUUID((uint16_t)0x2902)); // Client Characteristic Configuration
 
 // Inclination Characteristic and Descriptor
 BLECharacteristic inclinationCharacteristics("fedcba09-8765-4321-fedc-ba0987654321", BLECharacteristic::PROPERTY_NOTIFY);
-BLEDescriptor inclinationDescriptor(BLEUUID((uint16_t)0x2905));
+BLEDescriptor inclinationDescriptor(BLEUUID((uint16_t)0x2902)); // Client Characteristic Configuration
 
 //Setup callbacks onConnect and onDisconnect
 class MyServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     deviceConnected = true;
-    Serial.println("Cliente conectado - enviando datos offline...");
+    bleActive = true;
+    setCpuFrequencyMhz(CPU_FREQ_NORMAL); // Aumentar frecuencia cuando conectado
+    Serial.println("Cliente conectado - modo activo");
+    
+    // Habilitar automáticamente las notificaciones para todos los servicios
+    enableAllNotifications();
+    
     sendOfflineData();
-    // Reiniciar sistema offline al conectarse
     resetOfflineSystem();
   };
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
-    Serial.println("Cliente desconectado - modo offline activado");
+    bleActive = false;
+    setCpuFrequencyMhz(CPU_FREQ_LOW); // Reducir frecuencia cuando desconectado
+    Serial.println("Cliente desconectado - modo ahorro energía");
+    powerDownSensors(); // Apagar sensores no críticos
   }
 };
 
@@ -130,6 +149,64 @@ void resetOfflineSystem() {
   Serial.println(" minutos");
 }
 
+// Función para habilitar automáticamente todas las notificaciones
+void enableAllNotifications() {
+  // Habilitar notificaciones para el servicio de peso
+  uint8_t notificationOn[] = {0x01, 0x00};
+  weightCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
+  
+  // Habilitar notificaciones para el servicio offline
+  offlineDataCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
+  
+  // Habilitar notificaciones para el servicio de inclinación
+  inclinationCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
+  
+  Serial.println("Notificaciones habilitadas automáticamente para todos los servicios");
+}
+
+// Funciones de gestión de energía
+void powerDownSensors() {
+  // Apagar ADXL345 en modo sleep
+  accel.writeRegister(ADXL345_REG_POWER_CTL, 0x00); // Standby mode
+  Serial.println("ADXL345 en modo sleep");
+}
+
+void powerUpSensors() {
+  if (!sensorsInitialized) {
+    initSensors();
+  }
+  // Despertar ADXL345
+  accel.writeRegister(ADXL345_REG_POWER_CTL, 0x08); // Measurement mode
+  Serial.println("Sensores activados");
+}
+
+void initSensors() {
+  initHX711();
+  initADXL345();
+  sensorsInitialized = true;
+}
+
+void enterDeepSleep() {
+  Serial.println("Entrando en deep sleep...");
+  Serial.flush();
+  
+  // Desactivar WiFi y BT para ahorrar energía
+  esp_wifi_stop();
+  esp_bt_controller_disable();
+  
+  // Configurar timer para despertar
+  esp_sleep_enable_timer_wakeup(DEEP_SLEEP_TIME_OFFLINE * 1000000ULL); // microsegundos
+  
+  // Entrar en deep sleep
+  esp_deep_sleep_start();
+}
+
+void enterLightSleep() {
+  // Light sleep por corto tiempo cuando está conectado
+  esp_sleep_enable_timer_wakeup(LIGHT_SLEEP_TIME_CONNECTED * 1000000ULL);
+  esp_light_sleep_start();
+}
+
 // Función para enviar datos offline cuando se conecta BLE
 void sendOfflineData() {
   if (offlineMeasurementCount > 0) {
@@ -138,8 +215,9 @@ void sendOfflineData() {
     Serial.println(" medidas offline...");
     
     for (int i = 0; i < offlineMeasurementCount; i++) {
-      static char offlineDataString[50];
-      sprintf(offlineDataString, "OFFLINE: %.2f kg | %lu ms", 
+      static char offlineDataString[60];
+      // Formato JSON simplificado - solo datos esenciales
+      sprintf(offlineDataString, "{\"weight\":%.2f,\"timestamp\":%lu}", 
               offlineMeasurements[i].weight, 
               offlineMeasurements[i].timestamp);
       
@@ -155,34 +233,35 @@ void sendOfflineData() {
 }
 
 void initHX711(){
-  // Iniciar sensor
-  bascula.begin(pinData, pinClk);
-
-  // Aplicar la calibracion
-  bascula.set_scale(factor_calibracion);
-
-  bascula.tare();
-
-  // Obtener una lectura de referencia
-  long zero_factor = bascula.read_average();
-  // Mostrar la primera desviación
-  Serial.print("Zero factor: ");
-  Serial.println(zero_factor);
+  // Iniciar sensor solo si no está inicializado
+  if (!bascula.is_ready()) {
+    bascula.begin(pinData, pinClk);
+    bascula.set_scale(factor_calibracion);
+    bascula.tare();
+    
+    long zero_factor = bascula.read_average();
+    Serial.print("Zero factor: ");
+    Serial.println(zero_factor);
+  }
 }
 
 void initADXL345(){
-  // Inicializar I2C explícitamente con los pines correctos
-  Wire.begin(21, 22);  // SDA a GPIO21, SCL a GPIO22 en ESP32
+  // Inicializar I2C con frecuencia reducida para ahorrar energía
+  Wire.begin(21, 22);
+  Wire.setClock(100000); // 100kHz en lugar de 400kHz por defecto
 
   Serial.println("Iniciando el ADXL345...");
 
-  // Inicializar el ADXL345
   if (!accel.begin()) {
     Serial.println("No se pudo encontrar el ADXL345");
-    while (1);  // Detener ejecución
+    while (1);
   }
 
-  Serial.println("ADXL345 conectado correctamente");
+  // Configurar ADXL345 para bajo consumo
+  accel.setRange(ADXL345_RANGE_2_G); // Rango mínimo para menor consumo
+  accel.setDataRate(ADXL345_DATARATE_12_5_HZ); // Frecuencia baja
+  
+  Serial.println("ADXL345 conectado en modo bajo consumo");
 }
 
 // Función para leer inclinación del ADXL345
@@ -201,15 +280,39 @@ void readInclination() {
 }
 
 void setup() {
+  // Configurar CPU a baja frecuencia inicialmente
+  setCpuFrequencyMhz(CPU_FREQ_LOW);
+  
   // Start serial communication 
   Serial.begin(115200);
-  delay(1000);
+  delay(500); // Reducir delay inicial
+  
+  // Verificar causa del reset/despertar
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
+    Serial.println("Despertar desde deep sleep - tomando medida offline");
+    
+    // Solo inicializar HX711 para medida rápida
+    initHX711();
+    
+    // Tomar medida offline rápida
+    float offlineWeight = -1 * bascula.get_units();
+    unsigned long currentTime = millis();
+    storeOfflineMeasurement(offlineWeight, currentTime);
+    
+    // Volver a deep sleep inmediatamente
+    enterDeepSleep();
+  }
 
-  // Init HX711 Sensor
-  initHX711();
-
-  // Init ADXL345 Sensor
-  initADXL345();
+  // Inicialización completa solo en arranque normal
+  Serial.println("Inicialización completa...");
+  
+  // Deshabilitar WiFi para ahorrar energía
+  esp_wifi_stop();
+  
+  // Init Sensors
+  initSensors();
 
   // Create the BLE Device
   BLEDevice::init(bleServerName);
@@ -234,7 +337,7 @@ void setup() {
   offlineDataDescriptor.setValue("HX711 offline stored data");
   offlineDataCharacteristics.addDescriptor(&offlineDataDescriptor);
   
-  // Inclination Data
+  // Inclination Data - ahora también con CCC para auto-subscribe
   inclinationService->addCharacteristic(&inclinationCharacteristics);
   inclinationDescriptor.setValue("ADXL345 inclination pitch and roll");
   inclinationCharacteristics.addDescriptor(&inclinationDescriptor);
@@ -244,78 +347,81 @@ void setup() {
   offlineService->start();
   inclinationService->start();
 
-  // Start advertising
+  // Start advertising con configuración de bajo consumo
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->addServiceUUID(OFFLINE_SERVICE_UUID);
   pAdvertising->addServiceUUID(INCLINATION_SERVICE_UUID);
+  
+  // Configurar advertising para ahorro de energía
+  pAdvertising->setMinInterval(1600); // 1000ms
+  pAdvertising->setMaxInterval(3200); // 2000ms
+  
   pServer->getAdvertising()->start();
-  Serial.println("Waiting a client connection to notify...");
+  Serial.println("Sistema en modo bajo consumo - esperando conexión...");
+  
+  // Apagar sensores no críticos inicialmente
+  powerDownSensors();
 }
 
 void loop() {
   unsigned long currentTime = millis();
   
-  // Medidas offline cada 15 minutos (siempre activo)
-  if ((currentTime - lastOfflineTime) > offlineTimerDelay) {
+  if (!deviceConnected) {
+    // Modo offline - usar deep sleep para máximo ahorro
+    static unsigned long lastDeepSleep = 0;
+    
+    if ((currentTime - lastDeepSleep) > 30000) { // Esperar 30s antes de deep sleep
+      Serial.println("No hay conexión - entrando en deep sleep");
+      enterDeepSleep(); // Nunca retorna de aquí
+    }
+    
+    // Light sleep corto mientras espera conexión
+    delay(1000);
+    return;
+  }
+  
+  // Dispositivo conectado - modo activo
+  if (!sensorsInitialized) {
+    powerUpSensors();
+  }
+  
+  // Medidas en tiempo real cada 30 segundos (peso + inclinación simultáneamente)
+  if ((currentTime - lastTime) > timerDelay) {
     // Read weight from HX711 sensor
-    float offlineWeight = -1 * bascula.get_units();
+    peso = -1 * bascula.get_units();
     
-    if (!deviceConnected) {
-      // Si no está conectado, almacenar en memoria
-      storeOfflineMeasurement(offlineWeight, currentTime);
-    }
+    // Read inclination from ADXL345 sensor (en tiempo real junto con peso)
+    readInclination();
+
+    // Notify weight reading with timestamp - Formato JSON simplificado
+    static char weightData[60];
+    sprintf(weightData, "{\"weight\":%.2f,\"timestamp\":%lu}", peso, currentTime);
+    weightCharacteristics.setValue(weightData);
+    weightCharacteristics.notify();
     
-    lastOfflineTime = currentTime;
+    // Notify inclination reading - Formato JSON simplificado
+    static char inclinationData[80];
+    sprintf(inclinationData, "{\"pitch\":%.2f,\"roll\":%.2f,\"timestamp\":%lu}", 
+            pitch, roll, currentTime);
+    inclinationCharacteristics.setValue(inclinationData);
+    inclinationCharacteristics.notify();
+    
+    Serial.print("Datos en tiempo real - Peso: ");
+    Serial.print(peso, 1);
+    Serial.print(" kg | Pitch: ");
+    Serial.print(pitch, 2);
+    Serial.print("° | Roll: ");
+    Serial.print(roll, 2);
+    Serial.print("° | Timestamp: ");
+    Serial.print(currentTime);
+    Serial.print(" ms | CPU: ");
+    Serial.print(getCpuFrequencyMhz());
+    Serial.println(" MHz");
+    
+    lastTime = currentTime;
   }
   
-  // Medidas en tiempo real cada 30 segundos (solo cuando está conectado)
-  if (deviceConnected) {
-    if ((currentTime - lastTime) > timerDelay) {
-      // Read weight from HX711 sensor
-      peso = -1 * bascula.get_units();
-  
-      //Notify weight reading with timestamp from HX711 sensor
-      static char weightWithTimestamp[30];
-      sprintf(weightWithTimestamp, "LIVE: %.2f kg | %lu ms", peso, currentTime);
-      //Set weight+timestamp Characteristic value and notify connected client
-      weightCharacteristics.setValue(weightWithTimestamp);
-      weightCharacteristics.notify();
-      
-      Serial.print("Peso en vivo: ");
-      Serial.print(peso, 1);
-      Serial.print(" kgs");
-      Serial.print(" | Timestamp: ");
-      Serial.print(currentTime);
-      Serial.print(" ms");
-      Serial.print(" | factor_calibracion: ");
-      Serial.print(factor_calibracion);
-      Serial.println();
-      
-      lastTime = currentTime;
-    }
-    
-    // Medidas de inclinación cada 10 segundos (solo cuando está conectado)
-    if ((currentTime - lastInclinationTime) > inclinationTimerDelay) {
-      // Read inclination from ADXL345 sensor
-      readInclination();
-      
-      //Notify inclination reading from ADXL345 sensor
-      static char inclinationData[40];
-      sprintf(inclinationData, "Pitch: %.2f° | Roll: %.2f° | %lu ms", pitch, roll, currentTime);
-      //Set inclination Characteristic value and notify connected client
-      inclinationCharacteristics.setValue(inclinationData);
-      inclinationCharacteristics.notify();
-      
-      Serial.print("Inclinación - Pitch: ");
-      Serial.print(pitch, 2);
-      Serial.print("°, Roll: ");
-      Serial.print(roll, 2);
-      Serial.print("° | Timestamp: ");
-      Serial.print(currentTime);
-      Serial.println(" ms");
-      
-      lastInclinationTime = currentTime;
-    }
-  }
+  // Light sleep entre lecturas para ahorrar energía
+  enterLightSleep();
 }
