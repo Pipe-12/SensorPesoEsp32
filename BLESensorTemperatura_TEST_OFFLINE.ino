@@ -11,7 +11,7 @@
 #include "esp_wifi.h"
 
 //BLE server name
-#define bleServerName "CamperGas_Sensor"
+#define bleServerName "CamperGas_Sensor_TEST"
 
 // Configuración de ahorro de energía
 #define DEEP_SLEEP_TIME_OFFLINE 900 // 15 minutos en segundos
@@ -72,6 +72,7 @@ void readInclination();
 void storeOfflineMeasurement(float weight, unsigned long timestamp);
 void enterDeepSleep();
 void enterLightSleep();
+void generateTestOfflineData(); // Nueva función para test
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
@@ -102,16 +103,27 @@ class MyServerCallbacks: public BLEServerCallbacks {
     deviceConnected = true;
     bleActive = true;
     setCpuFrequencyMhz(CPU_FREQ_NORMAL); // Aumentar frecuencia cuando conectado
-    Serial.println("Cliente conectado - modo activo");
+    Serial.println("🔗 Cliente conectado - modo activo");
     
-    // Delay para estabilizar la conexión antes de habilitar notificaciones
-    delay(1000);
+    // Delay MUCHO más largo para que nRF Connect habilite completamente las notificaciones
+    Serial.println("⏳ Esperando que nRF Connect habilite notificaciones...");
+    delay(8000); // 8 segundos - tiempo suficiente para que nRF Connect termine completamente
     
-    // Habilitar automáticamente las notificaciones para todos los servicios
+    // Habilitar automáticamente las notificaciones para todos los servicios (por si acaso)
     enableAllNotifications();
     
+    // Delay adicional después de habilitar notificaciones
+    Serial.println("⏳ Esperando estabilización completa...");
+    delay(2000);
+    
+    // **TEST**: Generar datos offline de prueba y enviarlos
+    generateTestOfflineData();
+    
+    Serial.println("📋 Iniciando envío de datos offline...");
     sendOfflineData();
     resetOfflineSystem();
+    
+    Serial.println("🎉 Proceso de conexión completado");
   };
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
@@ -126,6 +138,26 @@ class MyServerCallbacks: public BLEServerCallbacks {
     Serial.println("Advertising reiniciado");
   }
 };
+
+// **NUEVA FUNCIÓN TEST**: Generar datos offline de prueba
+void generateTestOfflineData() {
+  Serial.println("=== GENERANDO DATOS OFFLINE DE PRUEBA ===");
+  
+  // Simular 5 medidas offline históricas
+  unsigned long baseTime = millis() - 300000; // Hace 5 minutos
+  
+  // Datos de prueba simulados
+  float testWeights[] = {2.5, 3.1, 2.8, 3.3, 2.9};
+  
+  for (int i = 0; i < 5; i++) {
+    unsigned long testTimestamp = baseTime + (i * 60000); // Cada minuto
+    storeOfflineMeasurement(testWeights[i], testTimestamp);
+  }
+  
+  Serial.print("Generadas ");
+  Serial.print(offlineMeasurementCount);
+  Serial.println(" medidas offline de prueba");
+}
 
 // Función para almacenar medida offline con sistema circular
 void storeOfflineMeasurement(float weight, unsigned long timestamp) {
@@ -182,14 +214,17 @@ void enableAllNotifications() {
   // Habilitar notificaciones para el servicio de peso
   uint8_t notificationOn[] = {0x01, 0x00};
   weightCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
+  Serial.println("✓ Notificaciones PESO habilitadas");
   
   // Habilitar notificaciones para el servicio offline
   offlineDataCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
+  Serial.println("✓ Notificaciones OFFLINE habilitadas");
   
   // Habilitar notificaciones para el servicio de inclinación
   inclinationCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
+  Serial.println("✓ Notificaciones INCLINACIÓN habilitadas");
   
-  Serial.println("Notificaciones habilitadas automáticamente para todos los servicios");
+  Serial.println("=== TODAS LAS NOTIFICACIONES HABILITADAS ===");
 }
 
 // Funciones de gestión de energía
@@ -248,29 +283,52 @@ void enterLightSleep() {
 // Función para enviar datos offline cuando se conecta BLE
 void sendOfflineData() {
   if (offlineMeasurementCount > 0) {
-    Serial.print("Enviando ");
+    Serial.print("=== ENVIANDO ");
     Serial.print(offlineMeasurementCount);
-    Serial.println(" medidas offline...");
+    Serial.println(" MEDIDAS OFFLINE POR CARACTERÍSTICA DE PESO ===");
+    
+    // Verificar que el dispositivo sigue conectado
+    if (!deviceConnected) {
+      Serial.println("ERROR: Dispositivo desconectado durante envío offline");
+      return;
+    }
     
     for (int i = 0; i < offlineMeasurementCount; i++) {
       static char offlineDataString[40];
-      // Formato JSON ultra compacto - datos esenciales
-      sprintf(offlineDataString, "{\"w\":%.1f,\"t\":%lu}", 
+      // Formato JSON ultra compacto - datos esenciales con marcador offline
+      sprintf(offlineDataString, "{\"w\":%.1f,\"t\":%lu,\"offline\":1}", 
               offlineMeasurements[i].weight, 
               offlineMeasurements[i].timestamp);
       
-      offlineDataCharacteristics.setValue(offlineDataString);
-      offlineDataCharacteristics.notify();
-      
-      Serial.print("Enviando offline JSON: ");
+      Serial.print("📤 Enviando offline [");
+      Serial.print(i + 1);
+      Serial.print("/");
+      Serial.print(offlineMeasurementCount);
+      Serial.print("]: ");
       Serial.println(offlineDataString);
+      Serial.print("   🎯 UUID: cba1d466-344c-4be3-ab3f-189f80dd7518 (PESO), Tamaño: ");
+      Serial.print(strlen(offlineDataString));
+      Serial.println(" bytes");
       
-      delay(100); // Pequeño delay entre envíos para evitar saturar BLE
+      // Verificar conexión antes de cada envío
+      if (!deviceConnected) {
+        Serial.println("❌ Conexión perdida durante envío");
+        break;
+      }
+      
+      // CAMBIO: Usar la característica de peso que sabemos que funciona
+      weightCharacteristics.setValue(offlineDataString);
+      weightCharacteristics.notify();
+      Serial.println("   ✅ Notify enviado por característica de PESO");
+      
+      delay(1000); // Delay de 1 segundo entre cada envío
     }
     
     // Vaciar memoria después de enviar
     offlineMeasurementCount = 0;
-    Serial.println("Datos offline enviados y memoria vaciada.");
+    Serial.println("=== DATOS OFFLINE ENVIADOS Y MEMORIA VACIADA ===");
+  } else {
+    Serial.println("⚠️ No hay datos offline para enviar");
   }
 }
 
@@ -360,32 +418,11 @@ void setup() {
   Serial.begin(115200);
   delay(500); // Reducir delay inicial
   
-  // Verificar causa del reset/despertar
-  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-  
-  if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
-    Serial.println("Despertar desde deep sleep - tomando medida offline");
-    
-    // Solo inicializar HX711 para medida rápida
-    initHX711();
-    
-    // Verificar que la báscula funciona antes de leer
-    if (bascula.is_ready()) {
-      float offlineWeight = -1 * bascula.get_units(3);
-      unsigned long currentTime = millis();
-      storeOfflineMeasurement(offlineWeight, currentTime);
-      Serial.print("Medida offline tomada: ");
-      Serial.print(offlineWeight);
-      Serial.println(" kg");
-    } else {
-      Serial.println("ERROR: HX711 no está listo para medida offline");
-    }
-    
-    // Volver a deep sleep inmediatamente
-    enterDeepSleep();
-  }
+  Serial.println("=== MODO TEST OFFLINE ===");
 
-  // Inicialización completa solo en arranque normal
+  // **SIMPLIFICADO PARA TEST**: Saltar deep sleep y ir directo a inicialización
+  
+  // Inicialización completa
   Serial.println("Inicialización completa...");
   
   // Deshabilitar WiFi para ahorrar energía
@@ -408,20 +445,23 @@ void setup() {
   BLEService *sensorService = pServer->createService(SENSOR_SERVICE_UUID);
 
   // Create BLE Characteristics and Create a BLE Descriptor
-  // Weight (includes timestamp)
+  // Weight (real-time data)
   sensorService->addCharacteristic(&weightCharacteristics);
   weightDescriptor.setValue("Weight");
   weightCharacteristics.addDescriptor(&weightDescriptor);
+  Serial.println("✓ Característica PESO creada: cba1d466-344c-4be3-ab3f-189f80dd7518");
   
-  // Offline Data
+  // Offline Data (historical data)
   sensorService->addCharacteristic(&offlineDataCharacteristics);
   offlineDataDescriptor.setValue("Offline");
   offlineDataCharacteristics.addDescriptor(&offlineDataDescriptor);
+  Serial.println("✓ Característica OFFLINE creada: 87654321-4321-4321-4321-cba987654321");
   
-  // Inclination Data
+  // Inclination Data (real-time data)
   sensorService->addCharacteristic(&inclinationCharacteristics);
   inclinationDescriptor.setValue("Inclination");
   inclinationCharacteristics.addDescriptor(&inclinationDescriptor);
+  Serial.println("✓ Característica INCLINACIÓN creada: fedcba09-8765-4321-fedc-ba0987654321");
   
   // Start the service
   sensorService->start();
@@ -440,7 +480,14 @@ void setup() {
   pAdvertising->setScanResponse(true);
   
   pServer->getAdvertising()->start();
-  Serial.println("Sistema BLE activo - esperando conexión...");
+  Serial.println("📡 Sistema BLE TEST activo - esperando conexión...");
+  Serial.println("📱 INSTRUCCIONES para nRF Connect:");
+  Serial.println("   1. Conectar a 'CamperGas_Sensor_TEST'");
+  Serial.println("   2. Ir al servicio: 91bad492-b950-4226-aa2b-4ede9fa42f59");
+  Serial.println("   3. Habilitar notificaciones en la característica:");
+  Serial.println("      87654321-4321-4321-4321-cba987654321 (OFFLINE)");
+  Serial.println("   4. Al conectarse automáticamente recibirás 5 datos offline");
+  Serial.println("═══════════════════════════════════════════════════════════");
   
   // Apagar sensores no críticos inicialmente
   powerDownSensors();
@@ -450,15 +497,7 @@ void loop() {
   unsigned long currentTime = millis();
   
   if (!deviceConnected) {
-    // Modo offline - usar deep sleep para máximo ahorro
-    static unsigned long lastDeepSleep = 0;
-    
-    if ((currentTime - lastDeepSleep) > 30000) { // Esperar 30s antes de deep sleep
-      Serial.println("No hay conexión - entrando en deep sleep");
-      enterDeepSleep(); // Nunca retorna de aquí
-    }
-    
-    // Light sleep corto mientras espera conexión
+    // **SIMPLIFICADO PARA TEST**: No usar deep sleep, solo esperar conexión
     delay(1000);
     return;
   }
