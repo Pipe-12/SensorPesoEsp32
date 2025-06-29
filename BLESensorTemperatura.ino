@@ -11,7 +11,7 @@
 #include "esp_wifi.h"
 
 //BLE server name
-#define bleServerName "HX711_ESP32"
+#define bleServerName "CamperGas_Sensor"
 
 // Configuración de ahorro de energía
 #define DEEP_SLEEP_TIME_OFFLINE 900 // 15 minutos en segundos
@@ -60,9 +60,14 @@ bool deviceConnected = false;
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
-#define SERVICE_UUID "91bad492-b950-4226-aa2b-4ede9fa42f59"
-#define OFFLINE_SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
-#define INCLINATION_SERVICE_UUID "abcdef12-3456-7890-abcd-ef1234567890"
+
+// Un único servicio para el sensor de peso con inclinación
+#define SENSOR_SERVICE_UUID "91bad492-b950-4226-aa2b-4ede9fa42f59"
+
+// Tres características dentro del mismo servicio
+#define WEIGHT_CHARACTERISTIC_UUID "cba1d466-344c-4be3-ab3f-189f80dd7518"
+#define OFFLINE_CHARACTERISTIC_UUID "87654321-4321-4321-4321-cba987654321"
+#define INCLINATION_CHARACTERISTIC_UUID "fedcba09-8765-4321-fedc-ba0987654321"
 
 // Weight Characteristic and Descriptor (includes timestamp)
 BLECharacteristic weightCharacteristics("cba1d466-344c-4be3-ab3f-189f80dd7518", BLECharacteristic::PROPERTY_NOTIFY);
@@ -321,37 +326,31 @@ void setup() {
   BLEServer *pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
-  // Create the BLE Services
-  BLEService *weightService = pServer->createService(SERVICE_UUID);
-  BLEService *offlineService = pServer->createService(OFFLINE_SERVICE_UUID);
-  BLEService *inclinationService = pServer->createService(INCLINATION_SERVICE_UUID);
+  // Create the BLE Services (un solo servicio con 3 características)
+  BLEService *sensorService = pServer->createService(SENSOR_SERVICE_UUID);
 
   // Create BLE Characteristics and Create a BLE Descriptor
   // Weight (includes timestamp)
-  weightService->addCharacteristic(&weightCharacteristics);
+  sensorService->addCharacteristic(&weightCharacteristics);
   weightDescriptor.setValue("HX711 weight reading with timestamp");
   weightCharacteristics.addDescriptor(&weightDescriptor);
   
   // Offline Data
-  offlineService->addCharacteristic(&offlineDataCharacteristics);
+  sensorService->addCharacteristic(&offlineDataCharacteristics);
   offlineDataDescriptor.setValue("HX711 offline stored data");
   offlineDataCharacteristics.addDescriptor(&offlineDataDescriptor);
   
-  // Inclination Data - ahora también con CCC para auto-subscribe
-  inclinationService->addCharacteristic(&inclinationCharacteristics);
+  // Inclination Data
+  sensorService->addCharacteristic(&inclinationCharacteristics);
   inclinationDescriptor.setValue("ADXL345 inclination pitch and roll");
   inclinationCharacteristics.addDescriptor(&inclinationDescriptor);
   
-  // Start the services
-  weightService->start();
-  offlineService->start();
-  inclinationService->start();
+  // Start the service
+  sensorService->start();
 
   // Start advertising con configuración de bajo consumo
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->addServiceUUID(OFFLINE_SERVICE_UUID);
-  pAdvertising->addServiceUUID(INCLINATION_SERVICE_UUID);
+  pAdvertising->addServiceUUID(SENSOR_SERVICE_UUID);
   
   // Configurar advertising para ahorro de energía
   pAdvertising->setMinInterval(1600); // 1000ms
