@@ -6,7 +6,6 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
-#include "esp_sleep.h"
 #include "esp_bt.h"
 #include "esp_wifi.h"
 
@@ -14,7 +13,6 @@
 #define bleServerName "CamperGas_Sensor"
 
 // Configuración de ahorro de energía
-#define DEEP_SLEEP_TIME_OFFLINE 900 // 15 minutos en segundos
 #define LIGHT_SLEEP_TIME_CONNECTED 5 // 5 segundos cuando conectado
 #define CPU_FREQ_LOW 80 // MHz para bajo consumo
 #define CPU_FREQ_NORMAL 240 // MHz para operación normal
@@ -72,7 +70,7 @@ void initHX711WithTare(); // Nueva función para arranque inicial
 void initADXL345();
 void readInclination();
 void storeOfflineMeasurement(float weight, unsigned long timestamp);
-void enterDeepSleep();
+
 void enterLightSleep();
 
 // See the following for generating UUIDs:
@@ -232,20 +230,7 @@ void initSensors() {
   Serial.println("=== SENSORES INICIALIZADOS ===");
 }
 
-void enterDeepSleep() {
-  Serial.println("Entrando en deep sleep...");
-  Serial.flush();
-  
-  // Desactivar WiFi y BT para ahorrar energía
-  esp_wifi_stop();
-  esp_bt_controller_disable();
-  
-  // Configurar timer para despertar
-  esp_sleep_enable_timer_wakeup(DEEP_SLEEP_TIME_OFFLINE * 1000000ULL); // microsegundos
-  
-  // Entrar en deep sleep
-  esp_deep_sleep_start();
-}
+
 
 void enterLightSleep() {
   // Solo hacer light sleep muy corto cuando está conectado para no interferir con BLE
@@ -473,44 +458,7 @@ void setup() {
   Serial.begin(115200);
   delay(500); // Reducir delay inicial
   
-  // Verificar causa del reset/despertar
-  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-  
-  if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
-    Serial.println("Despertar desde deep sleep - tomando medida offline");
-    
-    // Solo inicializar HX711 SIN TARA para medida rápida
-    initHX711();
-    
-    // Delay adicional para asegurar estabilidad después de inicializar
-    Serial.println("Esperando estabilización del HX711...");
-    delay(2000); // 2 segundos adicionales
-    
-    // Verificar múltiples veces que la báscula funciona antes de leer
-    int readyAttempts = 0;
-    while (!bascula.is_ready() && readyAttempts < 10) {
-      delay(500);
-      Serial.print(".");
-      readyAttempts++;
-    }
-    Serial.println("");
-    
-    if (bascula.is_ready()) {
-      float offlineWeight = -1 * bascula.get_units(3);
-      unsigned long currentTime = millis() / 1000; // Convertir a segundos
-      storeOfflineMeasurement(offlineWeight, currentTime);
-      Serial.print("Medida offline tomada: ");
-      Serial.print(offlineWeight);
-      Serial.println(" kg");
-    } else {
-      Serial.println("ERROR: HX711 no está listo para medida offline después de múltiples intentos");
-    }
-    
-    // Volver a deep sleep inmediatamente
-    enterDeepSleep();
-  }
-
-  // Inicialización completa solo en arranque normal
+  // Inicialización completa
   Serial.println("Inicialización completa...");
   
   // Deshabilitar WiFi para ahorrar energía
@@ -575,16 +523,37 @@ void loop() {
   unsigned long currentTime = millis();
   
   if (!deviceConnected) {
-    // Modo offline - usar deep sleep para máximo ahorro
-    static unsigned long lastDeepSleep = 0;
-    
-    if ((currentTime - lastDeepSleep) > 30000) { // Esperar 30s antes de deep sleep
-      Serial.println("No hay conexión - entrando en deep sleep");
-      enterDeepSleep(); // Nunca retorna de aquí
+    // Modo offline - tomar medidas periódicamente para almacenar datos históricos
+    if ((currentTime - lastOfflineTime) > offlineTimerDelay) {
+      Serial.println("Tomando medida offline (sin conexión BLE)...");
+      
+      // Asegurar que los sensores están listos
+      if (!sensorsInitialized) {
+        powerUpSensors();
+      }
+      
+      // Verificar que HX711 está listo
+      if (bascula.is_ready()) {
+        float offlineWeight = -1 * bascula.get_units(3);
+        unsigned long timestamp = currentTime / 1000; // Convertir a segundos
+        
+        if (!isnan(offlineWeight)) {
+          storeOfflineMeasurement(offlineWeight, timestamp);
+          Serial.print("Medida offline almacenada: ");
+          Serial.print(offlineWeight);
+          Serial.println(" kg");
+        } else {
+          Serial.println("ERROR: Lectura NaN en modo offline");
+        }
+      } else {
+        Serial.println("WARNING: HX711 no está listo en modo offline");
+      }
+      
+      lastOfflineTime = currentTime;
     }
     
-    // Light sleep corto mientras espera conexión
-    delay(1000);
+    // Light sleep para ahorrar energía manteniendo BLE disponible
+    delay(5000); // Esperar 5 segundos antes de verificar conexión nuevamente
     return;
   }
   
