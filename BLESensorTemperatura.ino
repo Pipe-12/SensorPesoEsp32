@@ -49,7 +49,7 @@ int offlineIndex = 0; // Índice circular para reemplazar medidas antiguas
 // Estructura para almacenar datos offline
 struct MeasurementData {
   float weight;
-  unsigned long timestamp;
+  unsigned long timestamp; // Timestamp en segundos (no milisegundos)
 };
 
 // Array para almacenar medidas offline (máximo 100 medidas)
@@ -58,6 +58,7 @@ MeasurementData offlineMeasurements[MAX_OFFLINE_MEASUREMENTS];
 int offlineMeasurementCount = 0;
 
 bool deviceConnected = false;
+bool offlineDataSent = false; // Controlar si ya se enviaron los datos offline
 
 // Declaraciones de funciones
 void enableAllNotifications();
@@ -67,6 +68,7 @@ void powerDownSensors();
 void powerUpSensors();
 void initSensors();
 void initHX711();
+void initHX711WithTare(); // Nueva función para arranque inicial
 void initADXL345();
 void readInclination();
 void storeOfflineMeasurement(float weight, unsigned long timestamp);
@@ -102,19 +104,22 @@ class MyServerCallbacks: public BLEServerCallbacks {
     deviceConnected = true;
     bleActive = true;
     setCpuFrequencyMhz(CPU_FREQ_NORMAL); // Aumentar frecuencia cuando conectado
-    Serial.println("Cliente conectado - modo activo");
+    Serial.println("🔗 Cliente conectado - modo activo");
     
-    // Delay para estabilizar la conexión antes de habilitar notificaciones
-    delay(1000);
+    // Delay LARGO para que nRF Connect habilite completamente las notificaciones
+    Serial.println("⏳ Esperando que nRF Connect termine de conectarse...");
+    delay(3000); // 3 segundos para estabilizar
     
     // Habilitar automáticamente las notificaciones para todos los servicios
     enableAllNotifications();
     
-    sendOfflineData();
-    resetOfflineSystem();
+    Serial.println("🎉 Proceso de conexión completado");
+    Serial.println("🔄 Los datos en tiempo real comenzarán en 5 segundos...");
+    Serial.println("📋 Los datos offline se enviarán después de la primera medida en tiempo real (si hay datos almacenados)");
   };
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
+    offlineDataSent = false; // Reset para próxima conexión
     bleActive = false;
     setCpuFrequencyMhz(CPU_FREQ_LOW); // Reducir frecuencia cuando desconectado
     Serial.println("Cliente desconectado - modo ahorro energía");
@@ -138,7 +143,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
     Serial.print(weight);
     Serial.print(" kg, timestamp: ");
     Serial.print(timestamp);
-    Serial.print(" ms. Total almacenadas: ");
+    Serial.print(" seg. Total almacenadas: ");
     Serial.println(offlineMeasurementCount);
   } else {
     // Memoria llena, reemplazar la más antigua usando índice circular
@@ -150,7 +155,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
     Serial.print(weight);
     Serial.print(" kg, timestamp: ");
     Serial.print(timestamp);
-    Serial.print(" ms. Índice: ");
+    Serial.print(" seg. Índice: ");
     Serial.println(offlineIndex);
     
     // Duplicar el tiempo entre medidas (máximo 24 horas)
@@ -179,17 +184,24 @@ void resetOfflineSystem() {
 
 // Función para habilitar automáticamente todas las notificaciones
 void enableAllNotifications() {
-  // Habilitar notificaciones para el servicio de peso
+  // Habilitar notificaciones automáticamente
   uint8_t notificationOn[] = {0x01, 0x00};
-  weightCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
   
-  // Habilitar notificaciones para el servicio offline
+  Serial.println("🔧 Habilitando notificaciones automáticamente...");
+  
+  // OFFLINE - La más importante para los datos históricos
   offlineDataCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
+  Serial.println("✅ Notificaciones OFFLINE habilitadas (CRÍTICO para datos históricos)");
   
-  // Habilitar notificaciones para el servicio de inclinación
+  // PESO - para datos en tiempo real
+  weightCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
+  Serial.println("✓ Notificaciones PESO habilitadas (datos en tiempo real)");
+  
+  // Inclinación - para datos en tiempo real
   inclinationCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
+  Serial.println("✓ Notificaciones INCLINACIÓN habilitadas");
   
-  Serial.println("Notificaciones habilitadas automáticamente para todos los servicios");
+  Serial.println("=== CONFIGURACIÓN AUTOMÁTICA COMPLETADA ===");
 }
 
 // Funciones de gestión de energía
@@ -211,7 +223,7 @@ void powerUpSensors() {
 void initSensors() {
   Serial.println("=== INICIALIZANDO SENSORES ===");
   
-  initHX711();
+  initHX711WithTare(); // Usar versión con tara para arranque inicial
   hx711Initialized = true;
   
   initADXL345();
@@ -248,29 +260,115 @@ void enterLightSleep() {
 // Función para enviar datos offline cuando se conecta BLE
 void sendOfflineData() {
   if (offlineMeasurementCount > 0) {
-    Serial.print("Enviando ");
+    Serial.print("=== ENVIANDO ");
     Serial.print(offlineMeasurementCount);
-    Serial.println(" medidas offline...");
+    Serial.println(" MEDIDAS OFFLINE VIA CARACTERÍSTICA OFFLINE (BATCH MODE) ===");
+    
+    // Verificar que el dispositivo sigue conectado
+    if (!deviceConnected) {
+      Serial.println("ERROR: Dispositivo desconectado durante envío offline");
+      return;
+    }
+    
+    // Verificar estado de notificaciones de la característica OFFLINE
+    BLEDescriptor* offlineDescriptor = offlineDataCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
+    if (offlineDescriptor) {
+      Serial.println("🔍 Verificando estado de notificaciones OFFLINE...");
+      uint8_t* value = offlineDescriptor->getValue();
+      if (value && (value[0] & 0x01)) {
+        Serial.println("✅ Notificaciones OFFLINE CONFIRMADAS como habilitadas");
+      } else {
+        Serial.println("⚠️ Notificaciones OFFLINE NO detectadas - PROBLEMA CRÍTICO");
+        Serial.println("⚠️ El usuario debe habilitar notificaciones en 87654321-4321-4321-4321-cba987654321");
+      }
+    }
+    
+    // Enviar datos en lotes para aprovechar el MTU grande
+    static char offlineDataString[500];  // Buffer grande para múltiples medidas
+    int batchCount = 0;
+    int totalBatchesSent = 0; // Contador de lotes enviados
+    
+    // Construir JSON array con múltiples medidas
+    strcpy(offlineDataString, "[");  // Iniciar array JSON
     
     for (int i = 0; i < offlineMeasurementCount; i++) {
-      static char offlineDataString[40];
-      // Formato JSON ultra compacto - datos esenciales
-      sprintf(offlineDataString, "{\"w\":%.1f,\"t\":%lu}", 
+      char singleMeasurement[30];
+      sprintf(singleMeasurement, "{\"w\":%.1f,\"t\":%lu}", 
               offlineMeasurements[i].weight, 
               offlineMeasurements[i].timestamp);
       
-      offlineDataCharacteristics.setValue(offlineDataString);
-      offlineDataCharacteristics.notify();
+      // Verificar si cabe en el buffer actual
+      if (strlen(offlineDataString) + strlen(singleMeasurement) + 10 < 500) {
+        // Añadir coma si no es el primer elemento
+        if (i > 0) strcat(offlineDataString, ",");
+        strcat(offlineDataString, singleMeasurement);
+        batchCount++;
+      } else {
+        // Buffer lleno, enviar lote actual
+        strcat(offlineDataString, "]");  // Cerrar array JSON
+        
+        totalBatchesSent++;
+        Serial.print("📤 Enviando LOTE ");
+        Serial.print(totalBatchesSent);
+        Serial.print(" [");
+        Serial.print(batchCount);
+        Serial.print(" medidas]: ");
+        Serial.println(offlineDataString);
+        Serial.print("   🎯 UUID OFFLINE: 87654321-4321-4321-4321-cba987654321, Tamaño: ");
+        Serial.print(strlen(offlineDataString));
+        Serial.println(" bytes");
+        
+        // Verificar conexión antes de envío
+        if (!deviceConnected) {
+          Serial.println("❌ Conexión perdida durante envío");
+          break;
+        }
+        
+        // Enviar lote por característica OFFLINE
+        offlineDataCharacteristics.setValue(offlineDataString);
+        offlineDataCharacteristics.notify();
+        Serial.println("   ✅ Lote enviado por característica OFFLINE");
+        
+        // Delay entre lotes para estabilidad
+        delay(1000);
+        
+        // Reiniciar buffer para siguiente lote
+        strcpy(offlineDataString, "[");
+        strcat(offlineDataString, singleMeasurement);
+        batchCount = 1;
+      }
+    }
+    
+    // Enviar último lote si queda algo
+    if (batchCount > 0) {
+      strcat(offlineDataString, "]");  // Cerrar array JSON
       
-      Serial.print("Enviando offline JSON: ");
+      totalBatchesSent++;
+      Serial.print("📤 Enviando lote FINAL ");
+      Serial.print(totalBatchesSent);
+      Serial.print(" [");
+      Serial.print(batchCount);
+      Serial.print(" medidas]: ");
       Serial.println(offlineDataString);
+      Serial.print("   🎯 UUID OFFLINE: 87654321-4321-4321-4321-cba987654321, Tamaño: ");
+      Serial.print(strlen(offlineDataString));
+      Serial.println(" bytes");
       
-      delay(100); // Pequeño delay entre envíos para evitar saturar BLE
+      if (deviceConnected) {
+        offlineDataCharacteristics.setValue(offlineDataString);
+        offlineDataCharacteristics.notify();
+        Serial.println("   ✅ Lote final enviado por característica OFFLINE");
+      }
     }
     
     // Vaciar memoria después de enviar
     offlineMeasurementCount = 0;
-    Serial.println("Datos offline enviados y memoria vaciada.");
+    Serial.println("=== DATOS OFFLINE ENVIADOS EN LOTES Y MEMORIA VACIADA ===");
+    Serial.print("🎯 RESUMEN FINAL: ");
+    Serial.print(totalBatchesSent);
+    Serial.println(" lotes enviados total");
+  } else {
+    Serial.println("⚠️ No hay datos offline para enviar");
   }
 }
 
@@ -300,7 +398,22 @@ void initHX711(){
   // Configurar la escala
   bascula.set_scale(factor_calibracion);
   
-  // Hacer tara
+  Serial.println("HX711 inicializado correctamente");
+}
+
+// Función específica para inicialización completa con tara (solo arranque inicial)
+void initHX711WithTare(){
+  Serial.println("Iniciando la Bascula con tara...");
+  
+  // Inicializar básicamente
+  initHX711();
+  
+  if (!bascula.is_ready()) {
+    Serial.println("ERROR: No se puede hacer tara, HX711 no está listo");
+    return;
+  }
+  
+  // Solo hacer tara en arranque inicial
   Serial.println("Haciendo tara...");
   bascula.tare(10); // Promedio de 10 lecturas
   
@@ -315,7 +428,7 @@ void initHX711(){
   Serial.print(test_reading);
   Serial.println(" kg");
   
-  Serial.println("HX711 inicializado correctamente");
+  Serial.println("HX711 inicializado completamente con tara");
 }
 
 void initADXL345(){
@@ -366,19 +479,31 @@ void setup() {
   if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
     Serial.println("Despertar desde deep sleep - tomando medida offline");
     
-    // Solo inicializar HX711 para medida rápida
+    // Solo inicializar HX711 SIN TARA para medida rápida
     initHX711();
     
-    // Verificar que la báscula funciona antes de leer
+    // Delay adicional para asegurar estabilidad después de inicializar
+    Serial.println("Esperando estabilización del HX711...");
+    delay(2000); // 2 segundos adicionales
+    
+    // Verificar múltiples veces que la báscula funciona antes de leer
+    int readyAttempts = 0;
+    while (!bascula.is_ready() && readyAttempts < 10) {
+      delay(500);
+      Serial.print(".");
+      readyAttempts++;
+    }
+    Serial.println("");
+    
     if (bascula.is_ready()) {
       float offlineWeight = -1 * bascula.get_units(3);
-      unsigned long currentTime = millis();
+      unsigned long currentTime = millis() / 1000; // Convertir a segundos
       storeOfflineMeasurement(offlineWeight, currentTime);
       Serial.print("Medida offline tomada: ");
       Serial.print(offlineWeight);
       Serial.println(" kg");
     } else {
-      Serial.println("ERROR: HX711 no está listo para medida offline");
+      Serial.println("ERROR: HX711 no está listo para medida offline después de múltiples intentos");
     }
     
     // Volver a deep sleep inmediatamente
@@ -397,8 +522,8 @@ void setup() {
   // Create the BLE Device
   BLEDevice::init(bleServerName);
   
-  // Configurar MTU compatible para transmisión estable
-  BLEDevice::setMTU(128); // MTU más conservador para mayor compatibilidad
+  // Configurar MTU máximo para transmisiones más grandes
+  BLEDevice::setMTU(512); // MTU más grande para mayor capacidad de datos
 
   // Create the BLE Server
   BLEServer *pServer = BLEDevice::createServer();
@@ -470,6 +595,16 @@ void loop() {
   
   // Medidas en tiempo real cada 5 segundos (peso + inclinación simultáneamente)
   if ((currentTime - lastTime) > timerDelay) {
+    // **ENVIAR DATOS OFFLINE DESPUÉS DE LA PRIMERA MEDIDA EN TIEMPO REAL**
+    if (!offlineDataSent && offlineMeasurementCount > 0) {
+      Serial.println("📋 ¡ENVIANDO DATOS OFFLINE DESPUÉS DE ACTIVAR TIEMPO REAL!");
+      Serial.println("📱 Observa tu app nRF Connect ahora...");
+      sendOfflineData();
+      resetOfflineSystem();
+      offlineDataSent = true;
+      Serial.println("✅ Datos offline enviados, continuando con tiempo real...");
+    }
+    
     // Verificar que HX711 está listo antes de leer
     if (!bascula.is_ready()) {
       Serial.println("WARNING: HX711 no está listo, reinicializando...");

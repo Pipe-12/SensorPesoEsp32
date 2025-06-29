@@ -49,7 +49,7 @@ int offlineIndex = 0; // Índice circular para reemplazar medidas antiguas
 // Estructura para almacenar datos offline
 struct MeasurementData {
   float weight;
-  unsigned long timestamp;
+  unsigned long timestamp; // Timestamp en segundos (no milisegundos)
 };
 
 // Array para almacenar medidas offline (máximo 100 medidas)
@@ -58,6 +58,7 @@ MeasurementData offlineMeasurements[MAX_OFFLINE_MEASUREMENTS];
 int offlineMeasurementCount = 0;
 
 bool deviceConnected = false;
+bool offlineDataSent = false; // Controlar si ya se enviaron los datos offline
 
 // Declaraciones de funciones
 void enableAllNotifications();
@@ -105,28 +106,45 @@ class MyServerCallbacks: public BLEServerCallbacks {
     setCpuFrequencyMhz(CPU_FREQ_NORMAL); // Aumentar frecuencia cuando conectado
     Serial.println("🔗 Cliente conectado - modo activo");
     
-    // Delay MUCHO más largo para que nRF Connect habilite completamente las notificaciones
-    Serial.println("⏳ Esperando que nRF Connect habilite notificaciones...");
-    delay(8000); // 8 segundos - tiempo suficiente para que nRF Connect termine completamente
+    // Delay LARGO para que nRF Connect habilite completamente las notificaciones
+    Serial.println("⏳ Esperando que nRF Connect termine de conectarse...");
+    Serial.println("⏳ DURANTE ESTE TIEMPO: Habilita notificaciones manualmente si es necesario");
+    delay(6000); // 6 segundos - tiempo para que el usuario actúe
     
-    // Habilitar automáticamente las notificaciones para todos los servicios (por si acaso)
+    // Habilitar automáticamente las notificaciones (respaldo)
     enableAllNotifications();
     
-    // Delay adicional después de habilitar notificaciones
-    Serial.println("⏳ Esperando estabilización completa...");
+    // **CRÍTICO**: Activar las características enviando datos de prueba ANTES del envío masivo
+    Serial.println("🔧 ACTIVANDO características con datos de prueba...");
+    
+    // Activar característica de PESO
+    weightCharacteristics.setValue("{\"w\":0.0}");  // Dato de prueba
+    weightCharacteristics.notify();
+    Serial.println("✅ Característica PESO activada con dato de prueba");
+    delay(500);
+    
+    // Activar característica de INCLINACIÓN  
+    inclinationCharacteristics.setValue("{\"p\":0.0,\"r\":0.0}");  // Dato de prueba
+    inclinationCharacteristics.notify();
+    Serial.println("✅ Característica INCLINACIÓN activada con dato de prueba");
+    delay(500);
+    
+    // **MUY IMPORTANTE**: Activar característica OFFLINE con dato de prueba
+    offlineDataCharacteristics.setValue("[{\"test\":\"inicio\"}]");  // Dato de activación
+    offlineDataCharacteristics.notify();
+    Serial.println("✅ Característica OFFLINE activada con dato de prueba");
+    Serial.println("📱 ¡Ahora deberías ver notificaciones en nRF Connect!");
     delay(2000);
     
-    // **TEST**: Generar datos offline de prueba y enviarlos
+    // **TEST**: Generar datos offline de prueba PERO NO ENVIARLOS AÚN
     generateTestOfflineData();
     
-    Serial.println("📋 Iniciando envío de datos offline...");
-    sendOfflineData();
-    resetOfflineSystem();
-    
     Serial.println("🎉 Proceso de conexión completado");
+    Serial.println("🔄 Los datos en tiempo real comenzarán en 5 segundos...");
   };
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
+    offlineDataSent = false; // Reset para próxima conexión
     bleActive = false;
     setCpuFrequencyMhz(CPU_FREQ_LOW); // Reducir frecuencia cuando desconectado
     Serial.println("Cliente desconectado - modo ahorro energía");
@@ -143,20 +161,27 @@ class MyServerCallbacks: public BLEServerCallbacks {
 void generateTestOfflineData() {
   Serial.println("=== GENERANDO DATOS OFFLINE DE PRUEBA ===");
   
-  // Simular 5 medidas offline históricas
-  unsigned long baseTime = millis() - 300000; // Hace 5 minutos
+  // Fecha base: 29 de junio de 2025, 12:00:00 (en timestamp Unix)
+  // 29 jun 2025 = 1751011200 segundos desde epoch (aproximadamente)
+  unsigned long baseTime = 1751011200; // 29 de junio de 2025, 12:00:00 UTC
   
-  // Datos de prueba simulados
-  float testWeights[] = {2.5, 3.1, 2.8, 3.3, 2.9};
+  Serial.print("Timestamp base (29 jun 2025, 12:00): ");
+  Serial.println(baseTime);
   
-  for (int i = 0; i < 5; i++) {
-    unsigned long testTimestamp = baseTime + (i * 60000); // Cada minuto
-    storeOfflineMeasurement(testWeights[i], testTimestamp);
+  // Generar 50 medidas offline históricas (cada 30 minutos hacia atrás)
+  for (int i = 0; i < 50; i++) {
+    // Timestamp hacia atrás: cada 30 minutos (1800 segundos)
+    unsigned long testTimestamp = baseTime - (i * 1800); // 30 minutos hacia atrás
+    
+    // Generar peso variado pero realista (entre 2.0 y 4.0 kg)
+    float testWeight = 2.0 + (i % 20) * 0.1 + (sin(i * 0.3) * 0.5); // Variación realista
+    
+    storeOfflineMeasurement(testWeight, testTimestamp);
   }
   
   Serial.print("Generadas ");
   Serial.print(offlineMeasurementCount);
-  Serial.println(" medidas offline de prueba");
+  Serial.println(" medidas offline de prueba (50 elementos con fecha 29/jun/2025)");
 }
 
 // Función para almacenar medida offline con sistema circular
@@ -170,7 +195,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
     Serial.print(weight);
     Serial.print(" kg, timestamp: ");
     Serial.print(timestamp);
-    Serial.print(" ms. Total almacenadas: ");
+    Serial.print(" seg. Total almacenadas: ");
     Serial.println(offlineMeasurementCount);
   } else {
     // Memoria llena, reemplazar la más antigua usando índice circular
@@ -182,7 +207,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
     Serial.print(weight);
     Serial.print(" kg, timestamp: ");
     Serial.print(timestamp);
-    Serial.print(" ms. Índice: ");
+    Serial.print(" seg. Índice: ");
     Serial.println(offlineIndex);
     
     // Duplicar el tiempo entre medidas (máximo 24 horas)
@@ -211,20 +236,26 @@ void resetOfflineSystem() {
 
 // Función para habilitar automáticamente todas las notificaciones
 void enableAllNotifications() {
-  // Habilitar notificaciones para el servicio de peso
+  // Habilitar notificaciones automáticamente
   uint8_t notificationOn[] = {0x01, 0x00};
-  weightCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
-  Serial.println("✓ Notificaciones PESO habilitadas");
   
-  // Habilitar notificaciones para el servicio offline
+  Serial.println("🔧 Habilitando notificaciones automáticamente...");
+  
+  // OFFLINE - La más importante para los datos históricos
   offlineDataCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
-  Serial.println("✓ Notificaciones OFFLINE habilitadas");
+  Serial.println("✅ Notificaciones OFFLINE habilitadas (CRÍTICO para datos históricos)");
   
-  // Habilitar notificaciones para el servicio de inclinación
+  // PESO - para datos en tiempo real
+  weightCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
+  Serial.println("✓ Notificaciones PESO habilitadas (datos en tiempo real)");
+  
+  // Inclinación - para datos en tiempo real
   inclinationCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
   Serial.println("✓ Notificaciones INCLINACIÓN habilitadas");
   
-  Serial.println("=== TODAS LAS NOTIFICACIONES HABILITADAS ===");
+  Serial.println("=== CONFIGURACIÓN AUTOMÁTICA COMPLETADA ===");
+  Serial.println("⚠️ IMPORTANTE: Si no recibes datos offline, habilita manualmente las notificaciones");
+  Serial.println("⚠️ en la característica: 87654321-4321-4321-4321-cba987654321");
 }
 
 // Funciones de gestión de energía
@@ -285,7 +316,7 @@ void sendOfflineData() {
   if (offlineMeasurementCount > 0) {
     Serial.print("=== ENVIANDO ");
     Serial.print(offlineMeasurementCount);
-    Serial.println(" MEDIDAS OFFLINE POR CARACTERÍSTICA DE PESO ===");
+    Serial.println(" MEDIDAS OFFLINE VIA CARACTERÍSTICA OFFLINE (BATCH MODE) ===");
     
     // Verificar que el dispositivo sigue conectado
     if (!deviceConnected) {
@@ -293,40 +324,105 @@ void sendOfflineData() {
       return;
     }
     
+    // Verificar estado de notificaciones de la característica OFFLINE
+    BLEDescriptor* offlineDescriptor = offlineDataCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
+    if (offlineDescriptor) {
+      Serial.println("🔍 Verificando estado de notificaciones OFFLINE...");
+      uint8_t* value = offlineDescriptor->getValue();
+      if (value && (value[0] & 0x01)) {
+        Serial.println("✅ Notificaciones OFFLINE CONFIRMADAS como habilitadas");
+      } else {
+        Serial.println("⚠️ Notificaciones OFFLINE NO detectadas - PROBLEMA CRÍTICO");
+        Serial.println("⚠️ El usuario debe habilitar notificaciones en 87654321-4321-4321-4321-cba987654321");
+      }
+    }
+    
+    // Enviar datos en lotes para aprovechar el MTU grande
+    static char offlineDataString[500];  // Buffer grande para múltiples medidas
+    int batchCount = 0;
+    int totalBatchesSent = 0; // Contador de lotes enviados
+    
+    // Construir JSON array con múltiples medidas
+    strcpy(offlineDataString, "[");  // Iniciar array JSON
+    
     for (int i = 0; i < offlineMeasurementCount; i++) {
-      static char offlineDataString[40];
-      // Formato JSON ultra compacto - datos esenciales con marcador offline
-      sprintf(offlineDataString, "{\"w\":%.1f,\"t\":%lu,\"offline\":1}", 
+      char singleMeasurement[30];
+      sprintf(singleMeasurement, "{\"w\":%.1f,\"t\":%lu}", 
               offlineMeasurements[i].weight, 
               offlineMeasurements[i].timestamp);
       
-      Serial.print("📤 Enviando offline [");
-      Serial.print(i + 1);
-      Serial.print("/");
-      Serial.print(offlineMeasurementCount);
-      Serial.print("]: ");
+      // Verificar si cabe en el buffer actual
+      if (strlen(offlineDataString) + strlen(singleMeasurement) + 10 < 500) {
+        // Añadir coma si no es el primer elemento
+        if (i > 0) strcat(offlineDataString, ",");
+        strcat(offlineDataString, singleMeasurement);
+        batchCount++;
+      } else {
+        // Buffer lleno, enviar lote actual
+        strcat(offlineDataString, "]");  // Cerrar array JSON
+        
+        totalBatchesSent++;
+        Serial.print("📤 Enviando LOTE ");
+        Serial.print(totalBatchesSent);
+        Serial.print(" [");
+        Serial.print(batchCount);
+        Serial.print(" medidas]: ");
+        Serial.println(offlineDataString);
+        Serial.print("   🎯 UUID OFFLINE: 87654321-4321-4321-4321-cba987654321, Tamaño: ");
+        Serial.print(strlen(offlineDataString));
+        Serial.println(" bytes");
+        
+        // Verificar conexión antes de envío
+        if (!deviceConnected) {
+          Serial.println("❌ Conexión perdida durante envío");
+          break;
+        }
+        
+        // Enviar lote por característica OFFLINE
+        offlineDataCharacteristics.setValue(offlineDataString);
+        offlineDataCharacteristics.notify();
+        Serial.println("   ✅ Lote enviado por característica OFFLINE");
+        
+        // DELAY LARGO entre lotes para poder ver cada uno por separado en nRF Connect
+        Serial.println("   ⏳ Esperando 10 segundos antes del siguiente lote...");
+        delay(10000); // 3 segundos entre lotes para poder observar cada uno
+        
+        // Reiniciar buffer para siguiente lote
+        strcpy(offlineDataString, "[");
+        strcat(offlineDataString, singleMeasurement);
+        batchCount = 1;
+      }
+    }
+    
+    // Enviar último lote si queda algo
+    if (batchCount > 0) {
+      strcat(offlineDataString, "]");  // Cerrar array JSON
+      
+      totalBatchesSent++;
+      Serial.print("📤 Enviando lote FINAL ");
+      Serial.print(totalBatchesSent);
+      Serial.print(" [");
+      Serial.print(batchCount);
+      Serial.print(" medidas]: ");
       Serial.println(offlineDataString);
-      Serial.print("   🎯 UUID: cba1d466-344c-4be3-ab3f-189f80dd7518 (PESO), Tamaño: ");
+      Serial.print("   🎯 UUID OFFLINE: 87654321-4321-4321-4321-cba987654321, Tamaño: ");
       Serial.print(strlen(offlineDataString));
       Serial.println(" bytes");
       
-      // Verificar conexión antes de cada envío
-      if (!deviceConnected) {
-        Serial.println("❌ Conexión perdida durante envío");
-        break;
+      if (deviceConnected) {
+        offlineDataCharacteristics.setValue(offlineDataString);
+        offlineDataCharacteristics.notify();
+        Serial.println("   ✅ Lote final enviado por característica OFFLINE");
       }
-      
-      // CAMBIO: Usar la característica de peso que sabemos que funciona
-      weightCharacteristics.setValue(offlineDataString);
-      weightCharacteristics.notify();
-      Serial.println("   ✅ Notify enviado por característica de PESO");
-      
-      delay(1000); // Delay de 1 segundo entre cada envío
     }
     
     // Vaciar memoria después de enviar
     offlineMeasurementCount = 0;
-    Serial.println("=== DATOS OFFLINE ENVIADOS Y MEMORIA VACIADA ===");
+    Serial.println("=== DATOS OFFLINE ENVIADOS EN LOTES Y MEMORIA VACIADA ===");
+    Serial.print("🎯 RESUMEN FINAL: ");
+    Serial.print(totalBatchesSent);
+    Serial.println(" lotes enviados total");
+    Serial.println("📱 En nRF Connect deberías ver cada lote por separado con 10 segundos de diferencia");
   } else {
     Serial.println("⚠️ No hay datos offline para enviar");
   }
@@ -434,8 +530,8 @@ void setup() {
   // Create the BLE Device
   BLEDevice::init(bleServerName);
   
-  // Configurar MTU compatible para transmisión estable
-  BLEDevice::setMTU(128); // MTU más conservador para mayor compatibilidad
+  // Configurar MTU máximo para transmisiones más grandes
+  BLEDevice::setMTU(512); // MTU más grande para mayor capacidad de datos
 
   // Create the BLE Server
   BLEServer *pServer = BLEDevice::createServer();
@@ -481,12 +577,15 @@ void setup() {
   
   pServer->getAdvertising()->start();
   Serial.println("📡 Sistema BLE TEST activo - esperando conexión...");
-  Serial.println("📱 INSTRUCCIONES para nRF Connect:");
+  Serial.println("📱 INSTRUCCIONES CRÍTICAS para nRF Connect:");
   Serial.println("   1. Conectar a 'CamperGas_Sensor_TEST'");
   Serial.println("   2. Ir al servicio: 91bad492-b950-4226-aa2b-4ede9fa42f59");
-  Serial.println("   3. Habilitar notificaciones en la característica:");
-  Serial.println("      87654321-4321-4321-4321-cba987654321 (OFFLINE)");
-  Serial.println("   4. Al conectarse automáticamente recibirás 5 datos offline");
+  Serial.println("   3. ⚠️ IMPORTANTE: Habilitar notificaciones en:");
+  Serial.println("      87654321-4321-4321-4321-cba987654321 (OFFLINE DATA)");
+  Serial.println("   4. Los datos offline se enviarán en LOTES por su propia característica");
+  Serial.println("   5. Formato: [{\"w\":peso,\"t\":timestamp_seg},{\"w\":peso2,\"t\":timestamp_seg2}]");
+  Serial.println("   6. MTU: 512 bytes para máxima eficiencia");
+  Serial.println("   7. Timestamp en SEGUNDOS (no milisegundos)");
   Serial.println("═══════════════════════════════════════════════════════════");
   
   // Apagar sensores no críticos inicialmente
@@ -509,6 +608,16 @@ void loop() {
   
   // Medidas en tiempo real cada 5 segundos (peso + inclinación simultáneamente)
   if ((currentTime - lastTime) > timerDelay) {
+    // **ENVIAR DATOS OFFLINE DESPUÉS DE LA PRIMERA MEDIDA EN TIEMPO REAL**
+    if (!offlineDataSent && offlineMeasurementCount > 0) {
+      Serial.println("📋 ¡ENVIANDO DATOS OFFLINE DESPUÉS DE ACTIVAR TIEMPO REAL!");
+      Serial.println("📱 Observa tu app nRF Connect ahora...");
+      sendOfflineData();
+      resetOfflineSystem();
+      offlineDataSent = true;
+      Serial.println("✅ Datos offline enviados, continuando con tiempo real...");
+    }
+    
     // Verificar que HX711 está listo antes de leer
     if (!bascula.is_ready()) {
       Serial.println("WARNING: HX711 no está listo, reinicializando...");
@@ -561,6 +670,11 @@ void loop() {
     Serial.print(" ms | CPU: ");
     Serial.print(getCpuFrequencyMhz());
     Serial.println(" MHz");
+    
+    // Almacenar medida offline si es necesario (usar timestamp en segundos)
+    unsigned long currentTimeSeconds = currentTime / 1000;
+    // Nota: En el código de producción, aquí se almacenaría la medida offline cuando no hay conexión
+    // storeOfflineMeasurement(peso, currentTimeSeconds);
     
     lastTime = currentTime;
   }
