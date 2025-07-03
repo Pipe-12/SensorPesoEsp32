@@ -6,6 +6,7 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
+#include <math.h>
 #include "esp_bt.h"
 #include "esp_wifi.h"
 
@@ -202,19 +203,17 @@ void enableAllNotifications() {
   Serial.println("=== CONFIGURACIÓN AUTOMÁTICA COMPLETADA ===");
 }
 
-// Funciones de gestión de energía
+// Funciones de gestión de energía - SIMPLIFICADAS
 void powerDownSensors() {
-  // Apagar ADXL345 en modo sleep
-  accel.writeRegister(ADXL345_REG_POWER_CTL, 0x00); // Standby mode
-  Serial.println("ADXL345 en modo sleep");
+  // NO apagar ADXL345 - mantenerlo siempre activo como en el código que funciona
+  Serial.println("Sensores en modo ahorro (ADXL345 permanece activo)");
 }
 
 void powerUpSensors() {
   if (!sensorsInitialized) {
     initSensors();
   }
-  // Despertar ADXL345
-  accel.writeRegister(ADXL345_REG_POWER_CTL, 0x08); // Measurement mode
+  // NO reinicializar ADXL345 - mantenerlo estable
   Serial.println("Sensores activados");
 }
 
@@ -417,37 +416,44 @@ void initHX711WithTare(){
 }
 
 void initADXL345(){
-  // Inicializar I2C con frecuencia reducida para ahorrar energía
-  Wire.begin(21, 22);
-  Wire.setClock(100000); // 100kHz en lugar de 400kHz por defecto
-
   Serial.println("Iniciando el ADXL345...");
 
+  // Inicializar el ADXL345 - IGUAL que el código que funciona
   if (!accel.begin()) {
     Serial.println("No se pudo encontrar el ADXL345");
-    while (1);
+    return; // No bloquear con while(1) para no parar BLE
   }
 
-  // Configurar ADXL345 para bajo consumo
-  accel.setRange(ADXL345_RANGE_2_G); // Rango mínimo para menor consumo
-  accel.setDataRate(ADXL345_DATARATE_12_5_HZ); // Frecuencia baja
-  
-  Serial.println("ADXL345 conectado en modo bajo consumo");
+  Serial.println("ADXL345 conectado correctamente");
 }
 
-// Función para leer inclinación del ADXL345
+// Función para leer inclinación del ADXL345 - EXACTAMENTE IGUAL que el código que funciona
 void readInclination() {
   sensors_event_t event;
   accel.getEvent(&event);
 
-  // Obtener valores
+  // Obtener los valores de aceleración en los tres ejes - IGUAL que el código que funciona
   float x = event.acceleration.x;
   float y = event.acceleration.y;
   float z = event.acceleration.z;
 
-  // Calcular pitch y roll
+  // Calcular el pitch y roll - EXACTAMENTE IGUAL que el código que funciona
   pitch = atan2(y, sqrt(x * x + z * z)) * 180.0 / PI;
   roll = atan2(-x, sqrt(y * y + z * z)) * 180.0 / PI;
+
+  // Debug: Mostrar valores como en el código que funciona
+  Serial.print("Valores crudos ADXL345 - X: ");
+  Serial.print(x);
+  Serial.print(" Y: ");
+  Serial.print(y);
+  Serial.print(" Z: ");
+  Serial.println(z);
+
+  Serial.print("Pitch calculado: ");
+  Serial.print(pitch);
+  Serial.print("° | Roll calculado: ");
+  Serial.print(roll);
+  Serial.println("°");
 }
 
 void setup() {
@@ -567,7 +573,6 @@ void loop() {
     // **ENVIAR DATOS OFFLINE DESPUÉS DE LA PRIMERA MEDIDA EN TIEMPO REAL**
     if (!offlineDataSent && offlineMeasurementCount > 0) {
       Serial.println("📋 ¡ENVIANDO DATOS OFFLINE DESPUÉS DE ACTIVAR TIEMPO REAL!");
-      Serial.println("📱 Observa tu app nRF Connect ahora...");
       sendOfflineData();
       resetOfflineSystem();
       offlineDataSent = true;
