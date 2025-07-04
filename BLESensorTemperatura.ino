@@ -133,12 +133,19 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
 // Función para almacenar medida offline con sistema circular
 void storeOfflineMeasurement(float weight, unsigned long timestamp) {
+  // Mostrar datos antes de almacenar
+  Serial.print("📊 Preparando almacenar - Peso: ");
+  Serial.print(weight);
+  Serial.print(" kg | Timestamp: ");
+  Serial.print(timestamp);
+  Serial.println(" seg");
+  
   if (offlineMeasurementCount < MAX_OFFLINE_MEASUREMENTS) {
     // Memoria no llena, añadir normalmente
     offlineMeasurements[offlineMeasurementCount].weight = weight;
     offlineMeasurements[offlineMeasurementCount].timestamp = timestamp;
     offlineMeasurementCount++;
-    Serial.print("Medida offline almacenada: ");
+    Serial.print("✅ Medida offline almacenada: ");
     Serial.print(weight);
     Serial.print(" kg, timestamp: ");
     Serial.print(timestamp);
@@ -146,15 +153,23 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
     Serial.println(offlineMeasurementCount);
   } else {
     // Memoria llena, reemplazar la más antigua usando índice circular
+    Serial.print("⚠️ Memoria llena - Reemplazando en índice ");
+    Serial.print(offlineIndex);
+    Serial.print(" - Peso: ");
+    Serial.print(weight);
+    Serial.print(" kg | Timestamp: ");
+    Serial.print(timestamp);
+    Serial.println(" seg");
+    
     offlineMeasurements[offlineIndex].weight = weight;
     offlineMeasurements[offlineIndex].timestamp = timestamp;
     offlineIndex = (offlineIndex + 1) % MAX_OFFLINE_MEASUREMENTS;
     
-    Serial.print("Memoria llena - Reemplazando medida antigua: ");
+    Serial.print("✅ Medida antigua reemplazada: ");
     Serial.print(weight);
     Serial.print(" kg, timestamp: ");
     Serial.print(timestamp);
-    Serial.print(" seg. Índice: ");
+    Serial.print(" seg. Nuevo índice: ");
     Serial.println(offlineIndex);
     
     // Duplicar el tiempo entre medidas (máximo 24 horas)
@@ -536,13 +551,21 @@ void loop() {
         float offlineWeight = -1 * bascula.get_units(3);
         unsigned long timestamp = currentTime / 1000; // Convertir a segundos
         
+        Serial.print("🔍 Medida offline obtenida - Peso: ");
+        Serial.print(offlineWeight);
+        Serial.print(" kg | Timestamp generado: ");
+        Serial.print(timestamp);
+        Serial.print(" seg (");
+        Serial.print(currentTime);
+        Serial.println(" ms)");
+        
         if (!isnan(offlineWeight)) {
           storeOfflineMeasurement(offlineWeight, timestamp);
-          Serial.print("Medida offline almacenada: ");
+          Serial.print("📦 Proceso completado - Peso almacenado: ");
           Serial.print(offlineWeight);
           Serial.println(" kg");
         } else {
-          Serial.println("ERROR: Lectura NaN en modo offline");
+          Serial.println("❌ ERROR: Lectura NaN en modo offline - no se almacena");
         }
       } else {
         Serial.println("WARNING: HX711 no está listo en modo offline");
