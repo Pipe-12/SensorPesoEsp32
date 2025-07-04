@@ -89,9 +89,8 @@ void enterLightSleep();
 BLECharacteristic weightCharacteristics("cba1d466-344c-4be3-ab3f-189f80dd7518", BLECharacteristic::PROPERTY_NOTIFY);
 BLEDescriptor weightDescriptor(BLEUUID((uint16_t)0x2902)); // Client Characteristic Configuration
 
-// Offline Data Characteristic and Descriptor
-BLECharacteristic offlineDataCharacteristics("87654321-4321-4321-4321-cba987654321", BLECharacteristic::PROPERTY_NOTIFY);
-BLEDescriptor offlineDataDescriptor(BLEUUID((uint16_t)0x2902)); // Client Characteristic Configuration
+// Offline Data Characteristic (READ-only, sin descriptor)
+BLECharacteristic offlineDataCharacteristics("87654321-4321-4321-4321-cba987654321", BLECharacteristic::PROPERTY_READ);
 
 // Inclination Characteristic and Descriptor
 BLECharacteristic inclinationCharacteristics("fedcba09-8765-4321-fedc-ba0987654321", BLECharacteristic::PROPERTY_NOTIFY);
@@ -114,7 +113,8 @@ class MyServerCallbacks: public BLEServerCallbacks {
     
     Serial.println("🎉 Proceso de conexión completado");
     Serial.println("🔄 Los datos en tiempo real comenzarán en 5 segundos...");
-    Serial.println("📋 Los datos offline se enviarán después de la primera medida en tiempo real (si hay datos almacenados)");
+    Serial.println("📋 Los datos offline se prepararán después de la primera medida en tiempo real (si hay datos almacenados)");
+    Serial.println("📋 Para leer datos offline: LEER característica 87654321-4321-4321-4321-cba987654321");
   };
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
@@ -181,16 +181,15 @@ void resetOfflineSystem() {
   Serial.println(" minutos");
 }
 
-// Función para habilitar automáticamente todas las notificaciones
+// Función para habilitar automáticamente las notificaciones (excluye offline)
 void enableAllNotifications() {
   // Habilitar notificaciones automáticamente
   uint8_t notificationOn[] = {0x01, 0x00};
   
   Serial.println("🔧 Habilitando notificaciones automáticamente...");
   
-  // OFFLINE - La más importante para los datos históricos
-  offlineDataCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
-  Serial.println("✅ Notificaciones OFFLINE habilitadas (CRÍTICO para datos históricos)");
+  // OFFLINE - Ahora es READ-only, no necesita notificaciones
+  Serial.println("✓ Característica OFFLINE configurada como READ-only (sin notificaciones)");
   
   // PESO - para datos en tiempo real
   weightCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
@@ -244,33 +243,25 @@ void enterLightSleep() {
 // Función para enviar datos offline cuando se conecta BLE
 void sendOfflineData() {
   if (offlineMeasurementCount > 0) {
-    Serial.print("=== ENVIANDO ");
+    Serial.print("=== PREPARANDO ");
     Serial.print(offlineMeasurementCount);
-    Serial.println(" MEDIDAS OFFLINE VIA CARACTERÍSTICA OFFLINE (BATCH MODE) ===");
+    Serial.println(" MEDIDAS OFFLINE VIA CARACTERÍSTICA READ-ONLY (BATCH MODE) ===");
     
     // Verificar que el dispositivo sigue conectado
     if (!deviceConnected) {
-      Serial.println("ERROR: Dispositivo desconectado durante envío offline");
+      Serial.println("ERROR: Dispositivo desconectado durante preparación offline");
       return;
     }
     
-    // Verificar estado de notificaciones de la característica OFFLINE
-    BLEDescriptor* offlineDescriptor = offlineDataCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
-    if (offlineDescriptor) {
-      Serial.println("🔍 Verificando estado de notificaciones OFFLINE...");
-      uint8_t* value = offlineDescriptor->getValue();
-      if (value && (value[0] & 0x01)) {
-        Serial.println("✅ Notificaciones OFFLINE CONFIRMADAS como habilitadas");
-      } else {
-        Serial.println("⚠️ Notificaciones OFFLINE NO detectadas - PROBLEMA CRÍTICO");
-        Serial.println("⚠️ El usuario debe habilitar notificaciones en 87654321-4321-4321-4321-cba987654321");
-      }
-    }
+    // Información para el usuario sobre cómo leer los datos
+    Serial.println("💡 DATOS OFFLINE LISTOS PARA LECTURA");
+    Serial.println("💡 El cliente debe LEER la característica: 87654321-4321-4321-4321-cba987654321");
+    Serial.println("💡 Los datos NO se envían automáticamente (característica READ-only)");
     
-    // Enviar datos en lotes para aprovechar el MTU grande
+    // Preparar datos en lotes para lectura posterior
     static char offlineDataString[500];  // Buffer grande para múltiples medidas
     int batchCount = 0;
-    int totalBatchesSent = 0; // Contador de lotes enviados
+    int totalBatches = 0; // Contador de lotes preparados
     
     // Construir JSON array con múltiples medidas
     strcpy(offlineDataString, "[");  // Iniciar array JSON
@@ -288,12 +279,12 @@ void sendOfflineData() {
         strcat(offlineDataString, singleMeasurement);
         batchCount++;
       } else {
-        // Buffer lleno, enviar lote actual
+        // Buffer lleno, preparar lote actual
         strcat(offlineDataString, "]");  // Cerrar array JSON
         
-        totalBatchesSent++;
-        Serial.print("📤 Enviando LOTE ");
-        Serial.print(totalBatchesSent);
+        totalBatches++;
+        Serial.print("� Preparando LOTE ");
+        Serial.print(totalBatches);
         Serial.print(" [");
         Serial.print(batchCount);
         Serial.print(" medidas]: ");
@@ -302,19 +293,18 @@ void sendOfflineData() {
         Serial.print(strlen(offlineDataString));
         Serial.println(" bytes");
         
-        // Verificar conexión antes de envío
+        // Verificar conexión
         if (!deviceConnected) {
-          Serial.println("❌ Conexión perdida durante envío");
+          Serial.println("❌ Conexión perdida durante preparación");
           break;
         }
         
-        // Enviar lote por característica OFFLINE
+        // Solo establecer valor para lectura posterior (NO notify)
         offlineDataCharacteristics.setValue(offlineDataString);
-        offlineDataCharacteristics.notify();
-        Serial.println("   ✅ Lote enviado por característica OFFLINE");
+        Serial.println("   ✅ Lote preparado para lectura (característica actualizada)");
         
-        // Delay entre lotes para estabilidad
-        delay(1000);
+        // Delay entre preparaciones para estabilidad
+        delay(500);
         
         // Reiniciar buffer para siguiente lote
         strcpy(offlineDataString, "[");
@@ -327,9 +317,9 @@ void sendOfflineData() {
     if (batchCount > 0) {
       strcat(offlineDataString, "]");  // Cerrar array JSON
       
-      totalBatchesSent++;
-      Serial.print("📤 Enviando lote FINAL ");
-      Serial.print(totalBatchesSent);
+      totalBatches++;
+      Serial.print("� Preparando lote FINAL ");
+      Serial.print(totalBatches);
       Serial.print(" [");
       Serial.print(batchCount);
       Serial.print(" medidas]: ");
@@ -340,19 +330,19 @@ void sendOfflineData() {
       
       if (deviceConnected) {
         offlineDataCharacteristics.setValue(offlineDataString);
-        offlineDataCharacteristics.notify();
-        Serial.println("   ✅ Lote final enviado por característica OFFLINE");
+        Serial.println("   ✅ Lote final preparado para lectura (característica actualizada)");
       }
     }
     
-    // Vaciar memoria después de enviar
+    // Vaciar memoria después de preparar datos
     offlineMeasurementCount = 0;
-    Serial.println("=== DATOS OFFLINE ENVIADOS EN LOTES Y MEMORIA VACIADA ===");
+    Serial.println("=== DATOS OFFLINE PREPARADOS Y MEMORIA VACIADA ===");
     Serial.print("🎯 RESUMEN FINAL: ");
-    Serial.print(totalBatchesSent);
-    Serial.println(" lotes enviados total");
+    Serial.print(totalBatches);
+    Serial.println(" lotes preparados total");
+    Serial.println("💡 El cliente debe LEER la característica para obtener los datos");
   } else {
-    Serial.println("⚠️ No hay datos offline para enviar");
+    Serial.println("⚠️ No hay datos offline para preparar");
   }
 }
 
@@ -492,10 +482,9 @@ void setup() {
   weightDescriptor.setValue("Weight");
   weightCharacteristics.addDescriptor(&weightDescriptor);
   
-  // Offline Data
+  // Offline Data (READ-only, sin descriptor)
   sensorService->addCharacteristic(&offlineDataCharacteristics);
-  offlineDataDescriptor.setValue("Offline");
-  offlineDataCharacteristics.addDescriptor(&offlineDataDescriptor);
+  // No agregar descriptor para característica read-only
   
   // Inclination Data
   sensorService->addCharacteristic(&inclinationCharacteristics);
@@ -520,6 +509,10 @@ void setup() {
   
   pServer->getAdvertising()->start();
   Serial.println("Sistema BLE activo - esperando conexión...");
+  Serial.println("📋 INFORMACIÓN IMPORTANTE:");
+  Serial.println("📋 - Datos en tiempo real: PESO y INCLINACIÓN se envían por notificación");
+  Serial.println("📋 - Datos offline/históricos: El cliente debe LEER la característica 87654321-4321-4321-4321-cba987654321");
+  Serial.println("📋 - Los datos offline NO se envían automáticamente");
   
   // Apagar sensores no críticos inicialmente
   powerDownSensors();
