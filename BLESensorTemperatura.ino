@@ -267,7 +267,7 @@ void sendOfflineData() {
     strcpy(offlineDataString, "[");  // Iniciar array JSON
     
     for (int i = 0; i < offlineMeasurementCount; i++) {
-      char singleMeasurement[30];
+      char singleMeasurement[50];  // Aumentado a 50 para timestamp completo
       sprintf(singleMeasurement, "{\"w\":%.1f,\"t\":%lu}", 
               offlineMeasurements[i].weight, 
               offlineMeasurements[i].timestamp);
