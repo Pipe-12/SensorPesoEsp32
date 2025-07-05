@@ -277,11 +277,32 @@ void sendOfflineData() {
     // Construir JSON array con múltiples medidas
     strcpy(offlineDataString, "[");  // Iniciar array JSON
     
+    // Timestamp actual para calcular tiempo transcurrido
+    unsigned long currentReadTime = millis();
+    Serial.print("⏰ Tiempo actual de lectura: ");
+    Serial.print(currentReadTime);
+    Serial.println(" ms");
+    
     for (int i = 0; i < offlineMeasurementCount; i++) {
+      // Calcular tiempo transcurrido desde la medida hasta ahora
+      unsigned long elapsedTime = currentReadTime - offlineMeasurements[i].timestamp;
+      
+      Serial.print("📊 Medida ");
+      Serial.print(i);
+      Serial.print(": Peso=");
+      Serial.print(offlineMeasurements[i].weight);
+      Serial.print("kg, Almacenada en=");
+      Serial.print(offlineMeasurements[i].timestamp);
+      Serial.print("ms, Transcurrido=");
+      Serial.print(elapsedTime);
+      Serial.print("ms (");
+      Serial.print(elapsedTime / 1000);
+      Serial.println(" segundos)");
+      
       char singleMeasurement[50];  // Aumentado a 50 para timestamp completo
       sprintf(singleMeasurement, "{\"w\":%.1f,\"t\":%lu}", 
               offlineMeasurements[i].weight, 
-              offlineMeasurements[i].timestamp);
+              elapsedTime); // Usar tiempo transcurrido en lugar de timestamp absoluto
       
       // Verificar si cabe en el buffer actual
       if (strlen(offlineDataString) + strlen(singleMeasurement) + 10 < 500) {
@@ -352,7 +373,7 @@ void sendOfflineData() {
     Serial.print(totalBatches);
     Serial.println(" lotes preparados total");
     Serial.println("💡 El cliente debe LEER la característica para obtener los datos");
-    Serial.println("💡 FORMATO JSON: {\"w\":peso_kg,\"t\":milisegundos_transcurridos}");
+    Serial.println("💡 FORMATO JSON: {\"w\":peso_kg,\"t\":milisegundos_transcurridos_desde_medida}");
   } else {
     Serial.println("⚠️ No hay datos offline para preparar");
   }
