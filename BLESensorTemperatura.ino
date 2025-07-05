@@ -11,7 +11,46 @@
 #include "esp_wifi.h"
 
 //BLE server name
-#define bleServerName "CamperGas_Sensor"
+#def    // Información para el usuario sobre cómo leer los datos
+    Serial.println("💡 DATOS OFFLINE LISTOS PARA LECTURA");
+    Serial.println("💡 El cliente debe LEER la característica: 87654321-4321-4321-4321-cba987654321");
+    Serial.println("💡 Los datos NO se envían automáticamente (característica read-only)");
+    Serial.println("💡 El timestamp representa MILISEGUNDOS TRANSCURRIDOS desde la medida hasta ahora");
+    
+    // Timestamp actual para calcular tiempo transcurrido
+    unsigned long currentReadTime = millis();
+    Serial.print("⏰ Tiempo actual de lectura: ");
+    Serial.print(currentReadTime);
+    Serial.println(" ms");
+    
+    // Preparar datos en lotes para lectura posterior
+    static char offlineDataString[500];  // Buffer grande para múltiples medidas
+    int batchCount = 0;
+    int totalBatches = 0; // Contador de lotes preparados
+    
+    // Construir JSON array con múltiples medidas
+    strcpy(offlineDataString, "[");  // Iniciar array JSON
+    
+    for (int i = 0; i < offlineMeasurementCount; i++) {
+      // Calcular tiempo transcurrido en milisegundos
+      unsigned long elapsedTime = currentReadTime - offlineMeasurements[i].timestamp;
+      
+      Serial.print("📊 Medida ");
+      Serial.print(i);
+      Serial.print(": Peso=");
+      Serial.print(offlineMeasurements[i].weight);
+      Serial.print("kg, Almacenada en=");
+      Serial.print(offlineMeasurements[i].timestamp);
+      Serial.print("ms, Transcurrido=");
+      Serial.print(elapsedTime);
+      Serial.print("ms (");
+      Serial.print(elapsedTime / 1000);
+      Serial.println(" segundos)");
+      
+      char singleMeasurement[60];  // Aumentado para timestamp largo
+      sprintf(singleMeasurement, "{\"w\":%.1f,\"t\":%lu}", 
+              offlineMeasurements[i].weight, 
+              elapsedTime);"CamperGas_Sensor"
 
 // Configuración de ahorro de energía
 #define LIGHT_SLEEP_TIME_CONNECTED 5 // 5 segundos cuando conectado
@@ -48,7 +87,7 @@ int offlineIndex = 0; // Índice circular para reemplazar medidas antiguas
 // Estructura para almacenar datos offline
 struct MeasurementData {
   float weight;
-  unsigned long timestamp; // Timestamp en segundos (no milisegundos)
+  unsigned long timestamp; // Timestamp en milisegundos desde boot (millis())
 };
 
 // Array para almacenar medidas offline (máximo 100 medidas)
@@ -138,7 +177,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
   Serial.print(weight);
   Serial.print(" kg | Timestamp: ");
   Serial.print(timestamp);
-  Serial.println(" seg");
+  Serial.println(" ms");
   
   if (offlineMeasurementCount < MAX_OFFLINE_MEASUREMENTS) {
     // Memoria no llena, añadir normalmente
@@ -149,7 +188,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
     Serial.print(weight);
     Serial.print(" kg, timestamp: ");
     Serial.print(timestamp);
-    Serial.print(" seg. Total almacenadas: ");
+    Serial.print(" ms. Total almacenadas: ");
     Serial.println(offlineMeasurementCount);
   } else {
     // Memoria llena, reemplazar la más antigua usando índice circular
@@ -159,7 +198,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
     Serial.print(weight);
     Serial.print(" kg | Timestamp: ");
     Serial.print(timestamp);
-    Serial.println(" seg");
+    Serial.println(" ms");
     
     offlineMeasurements[offlineIndex].weight = weight;
     offlineMeasurements[offlineIndex].timestamp = timestamp;
@@ -169,7 +208,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
     Serial.print(weight);
     Serial.print(" kg, timestamp: ");
     Serial.print(timestamp);
-    Serial.print(" seg. Nuevo índice: ");
+    Serial.print(" ms. Nuevo índice: ");
     Serial.println(offlineIndex);
     
     // Duplicar el tiempo entre medidas (máximo 24 horas)
@@ -356,6 +395,7 @@ void sendOfflineData() {
     Serial.print(totalBatches);
     Serial.println(" lotes preparados total");
     Serial.println("💡 El cliente debe LEER la característica para obtener los datos");
+    Serial.println("💡 FORMATO JSON: {\"w\":peso_kg,\"t\":milisegundos_transcurridos}");
   } else {
     Serial.println("⚠️ No hay datos offline para preparar");
   }
@@ -549,13 +589,13 @@ void loop() {
       // Verificar que HX711 está listo
       if (bascula.is_ready()) {
         float offlineWeight = -1 * bascula.get_units(3);
-        unsigned long timestamp = currentTime / 1000; // Convertir a segundos
+        unsigned long timestamp = currentTime; // Usar millis() directamente
         
         Serial.print("🔍 Medida offline obtenida - Peso: ");
         Serial.print(offlineWeight);
         Serial.print(" kg | Timestamp generado: ");
         Serial.print(timestamp);
-        Serial.print(" seg (");
+        Serial.print(" ms (");
         Serial.print(currentTime);
         Serial.println(" ms)");
         
