@@ -36,6 +36,7 @@ float pitch, roll; // Variables para inclinación
 bool sensorsInitialized = false;
 bool hx711Initialized = false;
 bool bleActive = false;
+bool tareCompleted = false; // Controlar si ya se hizo la tara inicial
 
 // Timer variables
 unsigned long lastTime = 0;
@@ -454,9 +455,14 @@ void initHX711(){
   // Configurar la escala
   bascula.set_scale(factor_calibracion);
   
-  // Hacer tara
-  Serial.println("Haciendo tara...");
-  bascula.tare(10); // Promedio de 10 lecturas
+  // Hacer tara solo si no se ha hecho anteriormente
+  if (!tareCompleted) {
+    Serial.println("Haciendo tara inicial...");
+    bascula.tare(10); // Promedio de 10 lecturas
+    tareCompleted = true; // Marcar que ya se hizo la tara
+  } else {
+    Serial.println("Tara ya completada anteriormente - saltando tara");
+  }
   
   // Verificar funcionamiento
   long zero_factor = bascula.read_average(5);

@@ -11,46 +11,7 @@
 #include "esp_wifi.h"
 
 //BLE server name
-#def    // Información para el usuario sobre cómo leer los datos
-    Serial.println("💡 DATOS OFFLINE LISTOS PARA LECTURA");
-    Serial.println("💡 El cliente debe LEER la característica: 87654321-4321-4321-4321-cba987654321");
-    Serial.println("💡 Los datos NO se envían automáticamente (característica read-only)");
-    Serial.println("💡 El timestamp representa MILISEGUNDOS TRANSCURRIDOS desde la medida hasta ahora");
-    
-    // Timestamp actual para calcular tiempo transcurrido
-    unsigned long currentReadTime = millis();
-    Serial.print("⏰ Tiempo actual de lectura: ");
-    Serial.print(currentReadTime);
-    Serial.println(" ms");
-    
-    // Preparar datos en lotes para lectura posterior
-    static char offlineDataString[500];  // Buffer grande para múltiples medidas
-    int batchCount = 0;
-    int totalBatches = 0; // Contador de lotes preparados
-    
-    // Construir JSON array con múltiples medidas
-    strcpy(offlineDataString, "[");  // Iniciar array JSON
-    
-    for (int i = 0; i < offlineMeasurementCount; i++) {
-      // Calcular tiempo transcurrido en milisegundos
-      unsigned long elapsedTime = currentReadTime - offlineMeasurements[i].timestamp;
-      
-      Serial.print("📊 Medida ");
-      Serial.print(i);
-      Serial.print(": Peso=");
-      Serial.print(offlineMeasurements[i].weight);
-      Serial.print("kg, Almacenada en=");
-      Serial.print(offlineMeasurements[i].timestamp);
-      Serial.print("ms, Transcurrido=");
-      Serial.print(elapsedTime);
-      Serial.print("ms (");
-      Serial.print(elapsedTime / 1000);
-      Serial.println(" segundos)");
-      
-      char singleMeasurement[60];  // Aumentado para timestamp largo
-      sprintf(singleMeasurement, "{\"w\":%.1f,\"t\":%lu}", 
-              offlineMeasurements[i].weight, 
-              elapsedTime);"CamperGas_Sensor"
+#define bleServerName "CamperGas_Sensor"
 
 // Configuración de ahorro de energía
 #define LIGHT_SLEEP_TIME_CONNECTED 5 // 5 segundos cuando conectado
@@ -72,8 +33,8 @@ float pitch, roll; // Variables para inclinación
 
 // Variables de estado de energía
 bool sensorsInitialized = false;
-bool hx711Initialized = false;
 bool bleActive = false;
+bool tareCompleted = false; // Controlar si ya se hizo la tara inicial
 
 // Timer variables
 unsigned long lastTime = 0;
@@ -256,9 +217,8 @@ void enableAllNotifications() {
   Serial.println("=== CONFIGURACIÓN AUTOMÁTICA COMPLETADA ===");
 }
 
-// Funciones de gestión de energía - SIMPLIFICADAS
+// Funciones de gestión de energía simplificadas
 void powerDownSensors() {
-  // NO apagar ADXL345 - mantenerlo siempre activo como en el código que funciona
   Serial.println("Sensores en modo ahorro (ADXL345 permanece activo)");
 }
 
@@ -266,7 +226,6 @@ void powerUpSensors() {
   if (!sensorsInitialized) {
     initSensors();
   }
-  // NO reinicializar ADXL345 - mantenerlo estable
   Serial.println("Sensores activados");
 }
 
@@ -274,8 +233,6 @@ void initSensors() {
   Serial.println("=== INICIALIZANDO SENSORES ===");
   
   initHX711WithTare(); // Usar versión con tara para arranque inicial
-  hx711Initialized = true;
-  
   initADXL345();
   
   sensorsInitialized = true;
@@ -442,51 +399,55 @@ void initHX711WithTare(){
     return;
   }
   
-  // Solo hacer tara en arranque inicial
-  Serial.println("Haciendo tara...");
-  bascula.tare(10); // Promedio de 10 lecturas
-  
-  // Verificar funcionamiento
-  long zero_factor = bascula.read_average(5);
-  Serial.print("Zero factor: ");
-  Serial.println(zero_factor);
-  
-  // Lectura de prueba
-  float test_reading = bascula.get_units(3);
-  Serial.print("Lectura de prueba: ");
-  Serial.print(test_reading);
-  Serial.println(" kg");
-  
-  Serial.println("HX711 inicializado completamente con tara");
+  // Solo hacer tara si no se ha hecho anteriormente
+  if (!tareCompleted) {
+    Serial.println("Haciendo tara inicial...");
+    bascula.tare(10); // Promedio de 10 lecturas
+    tareCompleted = true; // Marcar que ya se hizo la tara
+    
+    // Verificar funcionamiento
+    long zero_factor = bascula.read_average(5);
+    Serial.print("Zero factor: ");
+    Serial.println(zero_factor);
+    
+    // Lectura de prueba
+    float test_reading = bascula.get_units(3);
+    Serial.print("Lectura de prueba: ");
+    Serial.print(test_reading);
+    Serial.println(" kg");
+    
+    Serial.println("HX711 inicializado completamente con tara inicial");
+  } else {
+    Serial.println("Tara ya completada anteriormente - saltando tara");
+    Serial.println("HX711 inicializado sin tara");
+  }
 }
 
 void initADXL345(){
   Serial.println("Iniciando el ADXL345...");
 
-  // Inicializar el ADXL345 - IGUAL que el código que funciona
   if (!accel.begin()) {
     Serial.println("No se pudo encontrar el ADXL345");
-    return; // No bloquear con while(1) para no parar BLE
+    return;
   }
 
   Serial.println("ADXL345 conectado correctamente");
 }
 
-// Función para leer inclinación del ADXL345 - EXACTAMENTE IGUAL que el código que funciona
 void readInclination() {
   sensors_event_t event;
   accel.getEvent(&event);
 
-  // Obtener los valores de aceleración en los tres ejes - IGUAL que el código que funciona
+  // Obtener los valores de aceleración en los tres ejes
   float x = event.acceleration.x;
   float y = event.acceleration.y;
   float z = event.acceleration.z;
 
-  // Calcular el pitch y roll - EXACTAMENTE IGUAL que el código que funciona
+  // Calcular el pitch y roll
   pitch = atan2(y, sqrt(x * x + z * z)) * 180.0 / PI;
   roll = atan2(-x, sqrt(y * y + z * z)) * 180.0 / PI;
 
-  // Debug: Mostrar valores como en el código que funciona
+  // Debug: Mostrar valores
   Serial.print("Valores crudos ADXL345 - X: ");
   Serial.print(x);
   Serial.print(" Y: ");
@@ -494,9 +455,9 @@ void readInclination() {
   Serial.print(" Z: ");
   Serial.println(z);
 
-  Serial.print("Pitch calculado: ");
+  Serial.print("Pitch: ");
   Serial.print(pitch);
-  Serial.print("° | Roll calculado: ");
+  Serial.print("° | Roll: ");
   Serial.print(roll);
   Serial.println("°");
 }
