@@ -19,16 +19,28 @@
 #define CPU_FREQ_LOW 80 // MHz para bajo consumo
 #define CPU_FREQ_NORMAL 240 // MHz para operación normal
 
+// Configuración del ADXL345 para control de energía
+#define ADXL345_REG_POWER_CTL 0x2D
+#define ADXL345_POWER_STANDBY 0x00
+#define ADXL345_POWER_MEASURE 0x08
+
+// Configuración de timeouts y reintentos
+#define HX711_READY_TIMEOUT_MS 5000
+#define HX711_READY_ATTEMPTS 50
+#define HX711_AVERAGE_READINGS 3
+#define TARE_READINGS 10
+#define ZERO_FACTOR_READINGS 5
+
 // Pin de datos y de reloj para HX711
-byte pinData = 4;
-byte pinClk = 2;
+const byte pinData = 4;
+const byte pinClk = 2;
 
 HX711 bascula;
 
 // Crear el objeto del sensor ADXL345
 Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
 
-float factor_calibracion = 25000.0;  //Factor de calibracion
+const float factor_calibracion = 25000.0;  //Factor de calibracion
 float peso;
 float pitch, roll; // Variables para inclinación
 
@@ -39,8 +51,8 @@ bool tareCompleted = false;
 // Timer variables para offline
 unsigned long lastOfflineTime = 0;
 unsigned long offlineTimerDelay = 900000; // 15 minutos (15 * 60 * 1000 ms)
-unsigned long initialOfflineDelay = 900000; // 15 minutos inicial
-unsigned long maxOfflineDelay = 86400000; // 24 horas (24 * 60 * 60 * 1000 ms)
+const unsigned long initialOfflineDelay = 900000; // 15 minutos inicial
+const unsigned long maxOfflineDelay = 86400000; // 24 horas (24 * 60 * 60 * 1000 ms)
 int offlineIndex = 0; // Índice circular para reemplazar medidas antiguas
 
 // Estructura para almacenar datos offline
@@ -104,7 +116,7 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
             
             // Verificar que HX711 está listo
             if (bascula.is_ready()) {
-                float peso = -1 * bascula.get_units(3);
+                float peso = -1 * bascula.get_units(HX711_AVERAGE_READINGS);
                 
                 if (!isnan(peso)) {
                     static char weightData[20];
@@ -249,16 +261,21 @@ void resetOfflineSystem() {
   Serial.println("Sistema offline reiniciado");
 }
 
-// Funciones de gestión de energía simplificadas
+// Funciones de gestión de energía mejoradas
 void powerDownSensors() {
-  Serial.println("Sensores en modo ahorro (ADXL345 permanece activo)");
+  // Poner ADXL345 en modo standby para ahorrar energía
+  accel.writeRegister(ADXL345_REG_POWER_CTL, ADXL345_POWER_STANDBY);
+  Serial.println("Sensores en modo ahorro de energía (ADXL345 en standby)");
 }
 
 void powerUpSensors() {
   if (!sensorsInitialized) {
     initSensors();
+  } else {
+    // Despertar ADXL345 del standby
+    accel.writeRegister(ADXL345_REG_POWER_CTL, ADXL345_POWER_MEASURE);
+    Serial.println("Sensores activados (ADXL345 en modo medición)");
   }
-  Serial.println("Sensores activados");
 }
 
 void initSensors() {
@@ -272,12 +289,13 @@ void initSensors() {
 }
 
 void enterLightSleep() {
-  // Evitar light sleep que causa watchdog timer resets - usar delay normal
   if (deviceConnected) {
-    delay(100); // Delay corto cuando conectado para responder rápido
+    // Delay corto cuando conectado para responder rápido
+    delay(100);
   } else {
-    // Usar delay normal en lugar de light sleep para evitar watchdog timer reset
-    delay(5000); // 5 segundos de delay normal - evita conflictos con BLE
+    // Usar light sleep real cuando no está conectado para mejor ahorro de energía
+    esp_sleep_enable_timer_wakeup(5000000ULL); // 5 segundos en microsegundos
+    esp_light_sleep_start();
   }
 }
 
@@ -297,7 +315,7 @@ void sendOfflineData() {
     // Información para el usuario sobre cómo leer los datos
     Serial.println("💡 DATOS OFFLINE LISTOS PARA LECTURA");
     Serial.println("💡 El cliente debe LEER la característica: 87654321-4321-4321-4321-cba987654321");
-    Serial.println("💡 Los datos NO se envían automáticamente (característica READ-only)");
+    Serial.println("💡 Los datos NO se envían automáticamente (característica read-only)");
     
     // Preparar datos en lotes para lectura posterior
     static char offlineDataString[500];  // Buffer grande para múltiples medidas
@@ -415,10 +433,10 @@ void initHX711(){
   // Siempre inicializar la báscula
   bascula.begin(pinData, pinClk);
   
-  // Esperar a que el HX711 esté listo
+  // Esperar a que el HX711 esté listo con timeout mejorado
   Serial.print("Esperando HX711");
   int attempts = 0;
-  while (!bascula.is_ready() && attempts < 50) {
+  while (!bascula.is_ready() && attempts < HX711_READY_ATTEMPTS) {
     delay(100);
     Serial.print(".");
     attempts++;
@@ -426,7 +444,9 @@ void initHX711(){
   Serial.println("");
   
   if (!bascula.is_ready()) {
-    Serial.println("ERROR: HX711 no responde después de 5 segundos");
+    Serial.print("ERROR: HX711 no responde después de ");
+    Serial.print(HX711_READY_TIMEOUT_MS / 1000);
+    Serial.println(" segundos");
     return;
   }
   
@@ -451,14 +471,14 @@ void initHX711WithTare(){
   
   if (!tareCompleted) {
     Serial.println("Haciendo tara inicial...");
-    bascula.tare(10);
+    bascula.tare(TARE_READINGS);
     tareCompleted = true;
     
-    long zero_factor = bascula.read_average(5);
+    long zero_factor = bascula.read_average(ZERO_FACTOR_READINGS);
     Serial.print("Zero factor: ");
     Serial.println(zero_factor);
     
-    float test_reading = bascula.get_units(3);
+    float test_reading = bascula.get_units(HX711_AVERAGE_READINGS);
     Serial.print("Lectura de prueba: ");
     Serial.print(test_reading);
     Serial.println(" kg");
@@ -478,7 +498,9 @@ void initADXL345(){
     return;
   }
 
-  Serial.println("ADXL345 conectado correctamente");
+  // Configurar el ADXL345 en modo de medición
+  accel.writeRegister(ADXL345_REG_POWER_CTL, ADXL345_POWER_MEASURE);
+  Serial.println("ADXL345 conectado correctamente y configurado en modo medición");
 }
 
 void readInclination() {
@@ -510,9 +532,6 @@ void readInclination() {
 }
 
 void setup() {
-  // Deshabilitar watchdog timer para evitar resets
-  esp_task_wdt_delete(NULL);
-  
   // Configurar CPU a baja frecuencia inicialmente
   setCpuFrequencyMhz(CPU_FREQ_LOW);
   
@@ -598,7 +617,7 @@ void loop() {
       
       // Verificar que HX711 está listo
       if (bascula.is_ready()) {
-        float offlineWeight = -1 * bascula.get_units(3);
+        float offlineWeight = -1 * bascula.get_units(HX711_AVERAGE_READINGS);
         unsigned long timestamp = currentTime; // Usar millis() directamente
         
         Serial.print("🔍 Medida offline obtenida - Peso: ");
