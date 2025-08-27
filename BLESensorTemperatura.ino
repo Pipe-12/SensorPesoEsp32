@@ -7,16 +7,20 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
 #include <math.h>
+#include "esp_sleep.h"
 #include "esp_bt.h"
 #include "esp_wifi.h"
+#include "esp_task_wdt.h"
 
 //BLE server name
 #define bleServerName "CamperGas_Sensor"
 
 // Configuración de ahorro de energía
+#define DEEP_SLEEP_TIME_OFFLINE 900 // 15 minutos en segundos para modo offline
 #define LIGHT_SLEEP_TIME_CONNECTED 5 // 5 segundos cuando conectado
 #define CPU_FREQ_LOW 80 // MHz para bajo consumo
 #define CPU_FREQ_NORMAL 240 // MHz para operación normal
+#define WATCHDOG_TIMEOUT_SECONDS 30 // Watchdog timeout
 
 // Pin de datos y de reloj para HX711
 byte pinData = 4;
@@ -48,7 +52,7 @@ int offlineIndex = 0; // Índice circular para reemplazar medidas antiguas
 // Estructura para almacenar datos offline
 struct MeasurementData {
   float weight;
-  unsigned long timestamp; // Timestamp en milisegundos desde boot (millis())
+  unsigned long timestamp; // Timestamp unificado en segundos desde epoch
 };
 
 // Array para almacenar medidas offline (máximo 100 medidas)
@@ -73,7 +77,7 @@ void initHX711WithTare(); // Nueva función para arranque inicial
 void initADXL345();
 void readInclination();
 void storeOfflineMeasurement(float weight, unsigned long timestamp);
-
+void enterDeepSleep(); // Función de deep sleep
 void enterLightSleep();
 
 // See the following for generating UUIDs:
@@ -140,7 +144,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
   Serial.print(weight);
   Serial.print(" kg | Timestamp: ");
   Serial.print(timestamp);
-  Serial.println(" ms");
+  Serial.println(" seg");
   
   if (offlineMeasurementCount < MAX_OFFLINE_MEASUREMENTS) {
     // Memoria no llena, añadir normalmente
@@ -151,7 +155,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
     Serial.print(weight);
     Serial.print(" kg, timestamp: ");
     Serial.print(timestamp);
-    Serial.print(" ms. Total almacenadas: ");
+    Serial.print(" seg. Total almacenadas: ");
     Serial.println(offlineMeasurementCount);
   } else {
     // Memoria llena, reemplazar la más antigua usando índice circular
@@ -222,12 +226,16 @@ void enableAllNotifications() {
 // Funciones de gestión de energía simplificadas
 void powerDownSensors() {
   Serial.println("Sensores en modo ahorro (ADXL345 permanece activo)");
+  // Reducir frecuencia I2C para ahorrar energía
+  Wire.setClock(50000); // 50kHz en modo ahorro
 }
 
 void powerUpSensors() {
   if (!sensorsInitialized) {
     initSensors();
   }
+  // Restaurar frecuencia I2C normal
+  Wire.setClock(100000); // 100kHz normal
   Serial.println("Sensores activados");
 }
 
@@ -241,7 +249,20 @@ void initSensors() {
   Serial.println("=== SENSORES INICIALIZADOS ===");
 }
 
-
+void enterDeepSleep() {
+  Serial.println("Entrando en deep sleep para ahorrar energía...");
+  Serial.flush();
+  
+  // Apagar componentes no esenciales
+  esp_wifi_stop();
+  esp_bt_controller_disable();
+  
+  // Configurar timer para despertar
+  esp_sleep_enable_timer_wakeup(DEEP_SLEEP_TIME_OFFLINE * 1000000ULL); // microsegundos
+  
+  // Entrar en deep sleep
+  esp_deep_sleep_start();
+}
 
 void enterLightSleep() {
   // Solo hacer light sleep muy corto cuando está conectado para no interferir con BLE
@@ -526,8 +547,12 @@ void setup() {
   Serial.begin(115200);
   delay(500); // Reducir delay inicial
   
+  // Configurar watchdog timer para robustez
+  esp_task_wdt_init(WATCHDOG_TIMEOUT_SECONDS, true);
+  esp_task_wdt_add(NULL);
+  
   // Inicialización completa
-  Serial.println("Inicialización completa...");
+  Serial.println("Inicialización completa con watchdog...");
   
   // Deshabilitar WiFi para ahorrar energía
   esp_wifi_stop();
@@ -591,6 +616,9 @@ void setup() {
 }
 
 void loop() {
+  // Reset watchdog timer al inicio de cada loop
+  esp_task_wdt_reset();
+  
   unsigned long currentTime = millis();
   
   if (!deviceConnected) {
@@ -606,13 +634,13 @@ void loop() {
       // Verificar que HX711 está listo
       if (bascula.is_ready()) {
         float offlineWeight = -1 * bascula.get_units(3);
-        unsigned long timestamp = currentTime; // Usar millis() directamente
+        unsigned long timestamp = currentTime / 1000; // Convertir a segundos para consistencia
         
         Serial.print("🔍 Medida offline obtenida - Peso: ");
         Serial.print(offlineWeight);
-        Serial.print(" kg | Timestamp generado: ");
+        Serial.print(" kg | Timestamp: ");
         Serial.print(timestamp);
-        Serial.print(" ms (");
+        Serial.print(" seg (");
         Serial.print(currentTime);
         Serial.println(" ms)");
         
