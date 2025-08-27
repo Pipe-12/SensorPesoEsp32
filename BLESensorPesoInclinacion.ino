@@ -114,8 +114,23 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
                 powerUpSensors();
             }
             
-            // Verificar que HX711 está listo
-            if (bascula.is_ready()) {
+            // Verificar que HX711 está listo con retry logic
+            bool sensorReady = false;
+            int retryAttempts = 3; // Intentar hasta 3 veces
+            
+            for (int i = 0; i < retryAttempts && !sensorReady; i++) {
+                if (bascula.is_ready()) {
+                    sensorReady = true;
+                } else {
+                    if (i == 0) {
+                        Serial.print("⚠️ HX711 no está listo, reintentando");
+                    }
+                    Serial.print(".");
+                    delay(50); // Esperar 50ms antes del siguiente intento
+                }
+            }
+            
+            if (sensorReady) {
                 float peso = -1 * bascula.get_units(HX711_AVERAGE_READINGS);
                 
                 if (!isnan(peso)) {
@@ -131,7 +146,8 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
                     pCharacteristic->setValue("{\"w\":0.0}");
                 }
             } else {
-                Serial.println("❌ ERROR: HX711 no está listo");
+                Serial.println("\n❌ ERROR: HX711 no está listo después de reintentos, reinicializando...");
+                initHX711(); // Intentar reinicializar como último recurso
                 pCharacteristic->setValue("{\"w\":0.0}");
             }
         }
