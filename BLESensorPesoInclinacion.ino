@@ -293,9 +293,9 @@ void enterLightSleep() {
     // Delay corto cuando conectado para responder rápido
     delay(100);
   } else {
-    // Usar light sleep real cuando no está conectado para mejor ahorro de energía
-    esp_sleep_enable_timer_wakeup(5000000ULL); // 5 segundos en microsegundos
-    esp_light_sleep_start();
+    // NO usar light sleep real porque desactiva el BLE advertising
+    // En su lugar, usar delay más largo para ahorrar energía manteniendo BLE activo
+    delay(1000); // 1 segundo - suficiente para ahorrar energía pero mantener BLE advertising
   }
 }
 
