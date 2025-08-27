@@ -9,6 +9,7 @@
 #include <math.h>
 #include "esp_bt.h"
 #include "esp_wifi.h"
+#include "esp_task_wdt.h"
 
 //BLE server name
 #define bleServerName "CamperGas_Sensor"
@@ -33,12 +34,9 @@ float pitch, roll; // Variables para inclinación
 
 // Variables de estado de energía
 bool sensorsInitialized = false;
-bool bleActive = false;
-bool tareCompleted = false; // Controlar si ya se hizo la tara inicial
+bool tareCompleted = false;
 
-// Timer variables
-unsigned long lastTime = 0;
-unsigned long timerDelay = 5000; // 5 segundos para datos en tiempo real
+// Timer variables para offline
 unsigned long lastOfflineTime = 0;
 unsigned long offlineTimerDelay = 900000; // 15 minutos (15 * 60 * 1000 ms)
 unsigned long initialOfflineDelay = 900000; // 15 minutos inicial
@@ -57,21 +55,18 @@ MeasurementData offlineMeasurements[MAX_OFFLINE_MEASUREMENTS];
 int offlineMeasurementCount = 0;
 
 bool deviceConnected = false;
-bool offlineDataSent = false; // Controlar si ya se enviaron los datos offline
 
 // Declaraciones de funciones
-void enableAllNotifications();
 void sendOfflineData();
 void resetOfflineSystem();
 void powerDownSensors();
 void powerUpSensors();
 void initSensors();
 void initHX711();
-void initHX711WithTare(); // Nueva función para arranque inicial
+void initHX711WithTare();
 void initADXL345();
 void readInclination();
 void storeOfflineMeasurement(float weight, unsigned long timestamp);
-
 void enterLightSleep();
 
 // See the following for generating UUIDs:
@@ -85,41 +80,101 @@ void enterLightSleep();
 #define OFFLINE_CHARACTERISTIC_UUID "87654321-4321-4321-4321-cba987654321"
 #define INCLINATION_CHARACTERISTIC_UUID "fedcba09-8765-4321-fedc-ba0987654321"
 
-// Weight Characteristic and Descriptor (includes timestamp)
-BLECharacteristic weightCharacteristics("cba1d466-344c-4be3-ab3f-189f80dd7518", BLECharacteristic::PROPERTY_NOTIFY);
-BLEDescriptor weightDescriptor(BLEUUID((uint16_t)0x2902)); // Client Characteristic Configuration
+// Weight Characteristic (READ-only, sin descriptor)
+BLECharacteristic weightCharacteristics("cba1d466-344c-4be3-ab3f-189f80dd7518", BLECharacteristic::PROPERTY_READ);
 
 // Offline Data Characteristic (READ-only, sin descriptor)
 BLECharacteristic offlineDataCharacteristics("87654321-4321-4321-4321-cba987654321", BLECharacteristic::PROPERTY_READ);
 
-// Inclination Characteristic and Descriptor
-BLECharacteristic inclinationCharacteristics("fedcba09-8765-4321-fedc-ba0987654321", BLECharacteristic::PROPERTY_NOTIFY);
-BLEDescriptor inclinationDescriptor(BLEUUID((uint16_t)0x2902)); // Client Characteristic Configuration
+// Inclination Characteristic (READ-only, sin descriptor)
+BLECharacteristic inclinationCharacteristics("fedcba09-8765-4321-fedc-ba0987654321", BLECharacteristic::PROPERTY_READ);
+
+// Callback para lecturas de características
+class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
+    void onRead(BLECharacteristic* pCharacteristic) {
+        String uuid = pCharacteristic->getUUID().toString();
+        
+        if (uuid == WEIGHT_CHARACTERISTIC_UUID) {
+            Serial.println("📖 Dispositivo móvil solicita PESO - tomando medida...");
+            
+            // Asegurar que los sensores están listos
+            if (!sensorsInitialized) {
+                powerUpSensors();
+            }
+            
+            // Verificar que HX711 está listo
+            if (bascula.is_ready()) {
+                float peso = -1 * bascula.get_units(3);
+                
+                if (!isnan(peso)) {
+                    static char weightData[20];
+                    sprintf(weightData, "{\"w\":%.1f}", peso);
+                    pCharacteristic->setValue(weightData);
+                    
+                    Serial.print("✅ Peso enviado: ");
+                    Serial.print(peso);
+                    Serial.println(" kg");
+                } else {
+                    Serial.println("❌ ERROR: Lectura NaN de HX711");
+                    pCharacteristic->setValue("{\"w\":0.0}");
+                }
+            } else {
+                Serial.println("❌ ERROR: HX711 no está listo");
+                pCharacteristic->setValue("{\"w\":0.0}");
+            }
+        }
+        else if (uuid == INCLINATION_CHARACTERISTIC_UUID) {
+            Serial.println("📖 Dispositivo móvil solicita INCLINACIÓN - tomando medida...");
+            
+            // Asegurar que los sensores están listos
+            if (!sensorsInitialized) {
+                powerUpSensors();
+            }
+            
+            // Leer inclinación
+            readInclination();
+            
+            static char inclinationData[30];
+            sprintf(inclinationData, "{\"p\":%.1f,\"r\":%.1f}", pitch, roll);
+            pCharacteristic->setValue(inclinationData);
+            
+            Serial.print("✅ Inclinación enviada - Pitch: ");
+            Serial.print(pitch);
+            Serial.print("° | Roll: ");
+            Serial.print(roll);
+            Serial.println("°");
+        }
+        else if (uuid == OFFLINE_CHARACTERISTIC_UUID) {
+            Serial.println("📖 Dispositivo móvil solicita DATOS OFFLINE");
+            // La característica offline ya maneja su propio contenido
+            // No necesita callback especial porque ya está preparada
+        }
+    }
+};
 
 //Setup callbacks onConnect and onDisconnect
 class MyServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     deviceConnected = true;
-    bleActive = true;
     setCpuFrequencyMhz(CPU_FREQ_NORMAL); // Aumentar frecuencia cuando conectado
     Serial.println("🔗 Cliente conectado - modo activo");
     
-    // Delay LARGO para que nRF Connect habilite completamente las notificaciones
-    Serial.println("⏳ Esperando que nRF Connect termine de conectarse...");
-    delay(3000); // 3 segundos para estabilizar
-    
-    // Habilitar automáticamente las notificaciones para todos los servicios
-    enableAllNotifications();
-    
     Serial.println("🎉 Proceso de conexión completado");
-    Serial.println("🔄 Los datos en tiempo real comenzarán en 5 segundos...");
-    Serial.println("📋 Los datos offline se prepararán después de la primera medida en tiempo real (si hay datos almacenados)");
-    Serial.println("📋 Para leer datos offline: LEER característica 87654321-4321-4321-4321-cba987654321");
+    Serial.println("📋 MODO PULL ACTIVADO:");
+    Serial.println("📋 - El dispositivo móvil debe LEER las características para obtener datos");
+    Serial.println("📋 - PESO: cba1d466-344c-4be3-ab3f-189f80dd7518 (toma medida al leer)");
+    Serial.println("  - INCLINACIÓN: fedcba09-8765-4321-fedc-ba0987654321 (toma medida al leer)");
+    Serial.println("📋 - DATOS OFFLINE: 87654321-4321-4321-4321-cba987654321 (datos históricos)");
+    
+    // Preparar datos offline si hay datos almacenados
+    if (offlineMeasurementCount > 0) {
+      Serial.println("📋 Preparando datos offline...");
+      sendOfflineData();
+      resetOfflineSystem();
+    }
   };
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
-    offlineDataSent = false; // Reset para próxima conexión
-    bleActive = false;
     setCpuFrequencyMhz(CPU_FREQ_LOW); // Reducir frecuencia cuando desconectado
     Serial.println("Cliente desconectado - modo ahorro energía");
     powerDownSensors(); // Apagar sensores no críticos
@@ -191,30 +246,7 @@ void storeOfflineMeasurement(float weight, unsigned long timestamp) {
 void resetOfflineSystem() {
   offlineTimerDelay = initialOfflineDelay;
   offlineIndex = 0;
-  Serial.print("Sistema offline reiniciado - Intervalo: ");
-  Serial.print(offlineTimerDelay / 60000);
-  Serial.println(" minutos");
-}
-
-// Función para habilitar automáticamente las notificaciones (excluye offline)
-void enableAllNotifications() {
-  // Habilitar notificaciones automáticamente
-  uint8_t notificationOn[] = {0x01, 0x00};
-  
-  Serial.println("🔧 Habilitando notificaciones automáticamente...");
-  
-  // OFFLINE - Ahora es READ-only, no necesita notificaciones
-  Serial.println("✓ Característica OFFLINE configurada como READ-only (sin notificaciones)");
-  
-  // PESO - para datos en tiempo real
-  weightCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
-  Serial.println("✓ Notificaciones PESO habilitadas (datos en tiempo real)");
-  
-  // Inclinación - para datos en tiempo real
-  inclinationCharacteristics.getDescriptorByUUID(BLEUUID((uint16_t)0x2902))->setValue(notificationOn, 2);
-  Serial.println("✓ Notificaciones INCLINACIÓN habilitadas");
-  
-  Serial.println("=== CONFIGURACIÓN AUTOMÁTICA COMPLETADA ===");
+  Serial.println("Sistema offline reiniciado");
 }
 
 // Funciones de gestión de energía simplificadas
@@ -232,22 +264,20 @@ void powerUpSensors() {
 void initSensors() {
   Serial.println("=== INICIALIZANDO SENSORES ===");
   
-  initHX711WithTare(); // Usar versión con tara para arranque inicial
+  initHX711WithTare();
   initADXL345();
   
   sensorsInitialized = true;
   Serial.println("=== SENSORES INICIALIZADOS ===");
 }
 
-
-
 void enterLightSleep() {
-  // Solo hacer light sleep muy corto cuando está conectado para no interferir con BLE
+  // Evitar light sleep que causa watchdog timer resets - usar delay normal
   if (deviceConnected) {
-    delay(100); // Solo delay corto cuando conectado
+    delay(100); // Delay corto cuando conectado para responder rápido
   } else {
-    esp_sleep_enable_timer_wakeup(LIGHT_SLEEP_TIME_CONNECTED * 1000000ULL);
-    esp_light_sleep_start();
+    // Usar delay normal en lugar de light sleep para evitar watchdog timer reset
+    delay(5000); // 5 segundos de delay normal - evita conflictos con BLE
   }
 }
 
@@ -315,7 +345,7 @@ void sendOfflineData() {
         strcat(offlineDataString, "]");  // Cerrar array JSON
         
         totalBatches++;
-        Serial.print("� Preparando LOTE ");
+        Serial.print("  Preparando LOTE ");
         Serial.print(totalBatches);
         Serial.print(" [");
         Serial.print(batchCount);
@@ -350,7 +380,7 @@ void sendOfflineData() {
       strcat(offlineDataString, "]");  // Cerrar array JSON
       
       totalBatches++;
-      Serial.print("� Preparando lote FINAL ");
+      Serial.print("  Preparando lote FINAL ");
       Serial.print(totalBatches);
       Serial.print(" [");
       Serial.print(batchCount);
@@ -412,7 +442,6 @@ void initHX711(){
 void initHX711WithTare(){
   Serial.println("Iniciando la Bascula con tara...");
   
-  // Inicializar básicamente
   initHX711();
   
   if (!bascula.is_ready()) {
@@ -420,18 +449,15 @@ void initHX711WithTare(){
     return;
   }
   
-  // Solo hacer tara si no se ha hecho anteriormente
   if (!tareCompleted) {
     Serial.println("Haciendo tara inicial...");
-    bascula.tare(10); // Promedio de 10 lecturas
-    tareCompleted = true; // Marcar que ya se hizo la tara
+    bascula.tare(10);
+    tareCompleted = true;
     
-    // Verificar funcionamiento
     long zero_factor = bascula.read_average(5);
     Serial.print("Zero factor: ");
     Serial.println(zero_factor);
     
-    // Lectura de prueba
     float test_reading = bascula.get_units(3);
     Serial.print("Lectura de prueba: ");
     Serial.print(test_reading);
@@ -484,6 +510,9 @@ void readInclination() {
 }
 
 void setup() {
+  // Deshabilitar watchdog timer para evitar resets
+  esp_task_wdt_delete(NULL);
+  
   // Configurar CPU a baja frecuencia inicialmente
   setCpuFrequencyMhz(CPU_FREQ_LOW);
   
@@ -513,20 +542,18 @@ void setup() {
   // Create the BLE Services (un solo servicio con 3 características)
   BLEService *sensorService = pServer->createService(SENSOR_SERVICE_UUID);
 
-  // Create BLE Characteristics and Create a BLE Descriptor
-  // Weight (includes timestamp)
+  // Create BLE Characteristics (todas READ-only)
+  // Weight (READ-only, sin descriptor)
   sensorService->addCharacteristic(&weightCharacteristics);
-  weightDescriptor.setValue("Weight");
-  weightCharacteristics.addDescriptor(&weightDescriptor);
+  weightCharacteristics.setCallbacks(new MyCharacteristicCallbacks());
   
   // Offline Data (READ-only, sin descriptor)
   sensorService->addCharacteristic(&offlineDataCharacteristics);
-  // No agregar descriptor para característica read-only
+  // No agregar descriptor ni callback para característica offline
   
-  // Inclination Data
+  // Inclination Data (READ-only, sin descriptor)
   sensorService->addCharacteristic(&inclinationCharacteristics);
-  inclinationDescriptor.setValue("Inclination");
-  inclinationCharacteristics.addDescriptor(&inclinationDescriptor);
+  inclinationCharacteristics.setCallbacks(new MyCharacteristicCallbacks());
   
   // Start the service
   sensorService->start();
@@ -547,9 +574,10 @@ void setup() {
   pServer->getAdvertising()->start();
   Serial.println("Sistema BLE activo - esperando conexión...");
   Serial.println("📋 INFORMACIÓN IMPORTANTE:");
-  Serial.println("📋 - Datos en tiempo real: PESO y INCLINACIÓN se envían por notificación");
-  Serial.println("📋 - Datos offline/históricos: El cliente debe LEER la característica 87654321-4321-4321-4321-cba987654321");
-  Serial.println("📋 - Los datos offline NO se envían automáticamente");
+  Serial.println("📋 - MODO PULL ACTIVADO: El dispositivo móvil debe LEER las características");
+  Serial.println("📋 - PESO: cba1d466-344c-4be3-ab3f-189f80dd7518 (toma medida al leer)");
+  Serial.println("📋 - INCLINACIÓN: fedcba09-8765-4321-fedc-ba0987654321 (toma medida al leer)");
+  Serial.println("📋 - DATOS OFFLINE: 87654321-4321-4321-4321-cba987654321 (datos históricos)");
   
   // Apagar sensores no críticos inicialmente
   powerDownSensors();
@@ -596,83 +624,20 @@ void loop() {
       lastOfflineTime = currentTime;
     }
     
-    // Light sleep para ahorrar energía manteniendo BLE disponible
-    delay(5000); // Esperar 5 segundos antes de verificar conexión nuevamente
+    // Usar enterLightSleep para ahorrar energía manteniendo BLE disponible
+    enterLightSleep();
     return;
   }
   
-  // Dispositivo conectado - modo activo
+  // Dispositivo conectado - modo PULL activo
   if (!sensorsInitialized) {
     powerUpSensors();
   }
   
-  // Medidas en tiempo real cada 5 segundos (peso + inclinación simultáneamente)
-  if ((currentTime - lastTime) > timerDelay) {
-    // **ENVIAR DATOS OFFLINE DESPUÉS DE LA PRIMERA MEDIDA EN TIEMPO REAL**
-    if (!offlineDataSent && offlineMeasurementCount > 0) {
-      Serial.println("📋 ¡ENVIANDO DATOS OFFLINE DESPUÉS DE ACTIVAR TIEMPO REAL!");
-      sendOfflineData();
-      resetOfflineSystem();
-      offlineDataSent = true;
-      Serial.println("✅ Datos offline enviados, continuando con tiempo real...");
-    }
-    
-    // Verificar que HX711 está listo antes de leer
-    if (!bascula.is_ready()) {
-      Serial.println("WARNING: HX711 no está listo, reinicializando...");
-      initHX711();
-      return; // Saltar esta iteración
-    }
-    
-    // Read weight from HX711 sensor
-    peso = -1 * bascula.get_units(3); // Promedio de 3 lecturas
-    
-    // Verificar lectura válida
-    if (isnan(peso)) {
-      Serial.println("ERROR: Lectura NaN de HX711");
-      return;
-    }
-    
-    Serial.print("DEBUG - Peso leído: ");
-    Serial.println(peso);
-    
-    // Read inclination from ADXL345 sensor (en tiempo real junto con peso)
-    readInclination();
-
-    // Notify weight reading - Sin timestamp para máxima compactación
-    static char weightData[20];
-    sprintf(weightData, "{\"w\":%.1f}", peso);
-    weightCharacteristics.setValue(weightData);
-    weightCharacteristics.notify();
-    
-    Serial.print("Enviando peso JSON: ");
-    Serial.println(weightData);
-    
-    // Notify inclination reading - Sin timestamp para máxima compactación
-    static char inclinationData[30];
-    sprintf(inclinationData, "{\"p\":%.1f,\"r\":%.1f}", 
-            pitch, roll);
-    inclinationCharacteristics.setValue(inclinationData);
-    inclinationCharacteristics.notify();
-    
-    Serial.print("Enviando inclinación JSON: ");
-    Serial.println(inclinationData);
-    
-    Serial.print("Datos en tiempo real - Peso: ");
-    Serial.print(peso, 1);
-    Serial.print(" kg | Pitch: ");
-    Serial.print(pitch, 2);
-    Serial.print("° | Roll: ");
-    Serial.print(roll, 2);
-    Serial.print("° | Timestamp: ");
-    Serial.print(currentTime);
-    Serial.print(" ms | CPU: ");
-    Serial.print(getCpuFrequencyMhz());
-    Serial.println(" MHz");
-    
-    lastTime = currentTime;
-  }
+  // En modo PULL, no hay medidas automáticas
+  // Las medidas se toman solo cuando el dispositivo móvil lee las características
+  // Esto se maneja en los callbacks de MyCharacteristicCallbacks
   
-  // Light sleep entre lecturas para ahorrar energía
+  // Usar enterLightSleep entre verificaciones para ahorrar energía
   enterLightSleep();
 }
