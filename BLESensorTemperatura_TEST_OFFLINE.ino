@@ -6,6 +6,7 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
+#include <math.h>
 #include "esp_sleep.h"
 #include "esp_bt.h"
 #include "esp_wifi.h"
@@ -55,6 +56,9 @@ struct MeasurementData {
 
 // Array para almacenar medidas offline (máximo 100 medidas)
 #define MAX_OFFLINE_MEASUREMENTS 100
+#define MAX_JSON_BUFFER_SIZE 500
+#define SINGLE_MEASUREMENT_SIZE 30
+#define BLE_BATCH_DELAY_MS 2000  // Delay reducido entre lotes
 MeasurementData offlineMeasurements[MAX_OFFLINE_MEASUREMENTS];
 int offlineMeasurementCount = 0;
 
@@ -338,29 +342,39 @@ void sendOfflineData() {
       }
     }
     
-    // Enviar datos en lotes para aprovechar el MTU grande
-    static char offlineDataString[500];  // Buffer grande para múltiples medidas
+    // Enviar datos en lotes para aprovechar el MTU grande con protección de buffer
+    static char offlineDataString[MAX_JSON_BUFFER_SIZE];  // Buffer con tamaño fijo seguro
     int batchCount = 0;
     int totalBatchesSent = 0; // Contador de lotes enviados
     
     // Construir JSON array con múltiples medidas
-    strcpy(offlineDataString, "[");  // Iniciar array JSON
+    strncpy(offlineDataString, "[", MAX_JSON_BUFFER_SIZE - 1);  // Usar strncpy para seguridad
+    offlineDataString[MAX_JSON_BUFFER_SIZE - 1] = '\0'; // Asegurar terminación
     
     for (int i = 0; i < offlineMeasurementCount; i++) {
-      char singleMeasurement[30];
-      sprintf(singleMeasurement, "{\"w\":%.1f,\"t\":%lu}", 
-              offlineMeasurements[i].weight, 
-              offlineMeasurements[i].timestamp);
+      char singleMeasurement[SINGLE_MEASUREMENT_SIZE];
+      int len = snprintf(singleMeasurement, SINGLE_MEASUREMENT_SIZE, 
+                        "{\"w\":%.1f,\"t\":%lu}", 
+                        offlineMeasurements[i].weight, 
+                        offlineMeasurements[i].timestamp);
       
-      // Verificar si cabe en el buffer actual
-      if (strlen(offlineDataString) + strlen(singleMeasurement) + 10 < 500) {
+      // Verificar que el snprintf fue exitoso
+      if (len >= SINGLE_MEASUREMENT_SIZE) {
+        Serial.println("WARNING: Medida JSON truncada");
+        continue;
+      }
+      
+      // Verificar si cabe en el buffer actual con margen de seguridad
+      if (strlen(offlineDataString) + strlen(singleMeasurement) + 10 < MAX_JSON_BUFFER_SIZE - 1) {
         // Añadir coma si no es el primer elemento
-        if (i > 0) strcat(offlineDataString, ",");
-        strcat(offlineDataString, singleMeasurement);
+        if (i > 0) {
+          strncat(offlineDataString, ",", MAX_JSON_BUFFER_SIZE - strlen(offlineDataString) - 1);
+        }
+        strncat(offlineDataString, singleMeasurement, MAX_JSON_BUFFER_SIZE - strlen(offlineDataString) - 1);
         batchCount++;
       } else {
         // Buffer lleno, enviar lote actual
-        strcat(offlineDataString, "]");  // Cerrar array JSON
+        strncat(offlineDataString, "]", MAX_JSON_BUFFER_SIZE - strlen(offlineDataString) - 1);  // Cerrar array JSON
         
         totalBatchesSent++;
         Serial.print("📤 Enviando LOTE ");
@@ -384,13 +398,15 @@ void sendOfflineData() {
         offlineDataCharacteristics.notify();
         Serial.println("   ✅ Lote enviado por característica OFFLINE");
         
-        // DELAY LARGO entre lotes para poder ver cada uno por separado en nRF Connect
-        Serial.println("   ⏳ Esperando 10 segundos antes del siguiente lote...");
-        delay(10000); // 3 segundos entre lotes para poder observar cada uno
+        // DELAY optimizado entre lotes para mejor rendimiento
+        Serial.print("   ⏳ Esperando ");
+        Serial.print(BLE_BATCH_DELAY_MS / 1000);
+        Serial.println(" segundos antes del siguiente lote...");
+        delay(BLE_BATCH_DELAY_MS); // Delay configurable entre lotes
         
         // Reiniciar buffer para siguiente lote
-        strcpy(offlineDataString, "[");
-        strcat(offlineDataString, singleMeasurement);
+        strncpy(offlineDataString, "[", MAX_JSON_BUFFER_SIZE - 1);
+        strncat(offlineDataString, singleMeasurement, MAX_JSON_BUFFER_SIZE - strlen(offlineDataString) - 1);
         batchCount = 1;
       }
     }
@@ -485,16 +501,32 @@ void initADXL345(){
 
   Serial.println("Iniciando el ADXL345...");
 
-  if (!accel.begin()) {
-    Serial.println("No se pudo encontrar el ADXL345");
-    while (1);
-  }
-
-  // Configurar ADXL345 para bajo consumo
-  accel.setRange(ADXL345_RANGE_2_G); // Rango mínimo para menor consumo
-  accel.setDataRate(ADXL345_DATARATE_12_5_HZ); // Frecuencia baja
+  // Intentar inicializar con reintentos
+  int attempts = 0;
+  const int MAX_INIT_ATTEMPTS = 3;
   
-  Serial.println("ADXL345 conectado en modo bajo consumo");
+  while (attempts < MAX_INIT_ATTEMPTS) {
+    if (accel.begin()) {
+      Serial.println("ADXL345 conectado en modo bajo consumo");
+      
+      // Configurar ADXL345 para bajo consumo
+      accel.setRange(ADXL345_RANGE_2_G); // Rango mínimo para menor consumo
+      accel.setDataRate(ADXL345_DATARATE_12_5_HZ); // Frecuencia baja
+      
+      Serial.println("ADXL345 configurado: ±2g, 12.5Hz");
+      return;
+    }
+    
+    attempts++;
+    Serial.print("Intento ");
+    Serial.print(attempts);
+    Serial.println(" fallido, reintentando...");
+    delay(500);
+  }
+  
+  Serial.println("ERROR: No se pudo inicializar el ADXL345 después de 3 intentos");
+  Serial.println("Verificar conexiones I2C: SDA=21, SCL=22");
+}
 }
 
 // Función para leer inclinación del ADXL345

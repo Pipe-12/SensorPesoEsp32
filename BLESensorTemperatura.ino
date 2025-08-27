@@ -53,6 +53,8 @@ struct MeasurementData {
 
 // Array para almacenar medidas offline (máximo 100 medidas)
 #define MAX_OFFLINE_MEASUREMENTS 100
+#define MAX_JSON_BUFFER_SIZE 500
+#define SINGLE_MEASUREMENT_SIZE 50
 MeasurementData offlineMeasurements[MAX_OFFLINE_MEASUREMENTS];
 int offlineMeasurementCount = 0;
 
@@ -246,6 +248,7 @@ void enterLightSleep() {
   if (deviceConnected) {
     delay(100); // Solo delay corto cuando conectado
   } else {
+    // Modo desconectado: usar light sleep más eficiente
     esp_sleep_enable_timer_wakeup(LIGHT_SLEEP_TIME_CONNECTED * 1000000ULL);
     esp_light_sleep_start();
   }
@@ -269,13 +272,14 @@ void sendOfflineData() {
     Serial.println("💡 El cliente debe LEER la característica: 87654321-4321-4321-4321-cba987654321");
     Serial.println("💡 Los datos NO se envían automáticamente (característica READ-only)");
     
-    // Preparar datos en lotes para lectura posterior
-    static char offlineDataString[500];  // Buffer grande para múltiples medidas
+    // Preparar datos en lotes para lectura posterior con protección de buffer
+    static char offlineDataString[MAX_JSON_BUFFER_SIZE];  // Buffer con tamaño fijo seguro
     int batchCount = 0;
     int totalBatches = 0; // Contador de lotes preparados
     
     // Construir JSON array con múltiples medidas
-    strcpy(offlineDataString, "[");  // Iniciar array JSON
+    strncpy(offlineDataString, "[", MAX_JSON_BUFFER_SIZE - 1);  // Usar strncpy para seguridad
+    offlineDataString[MAX_JSON_BUFFER_SIZE - 1] = '\0'; // Asegurar terminación
     
     // Timestamp actual para calcular tiempo transcurrido
     unsigned long currentReadTime = millis();
@@ -299,13 +303,20 @@ void sendOfflineData() {
       Serial.print(elapsedTime / 1000);
       Serial.println(" segundos)");
       
-      char singleMeasurement[50];  // Aumentado a 50 para timestamp completo
-      sprintf(singleMeasurement, "{\"w\":%.1f,\"t\":%lu}", 
-              offlineMeasurements[i].weight, 
-              elapsedTime); // Usar tiempo transcurrido en lugar de timestamp absoluto
+      char singleMeasurement[SINGLE_MEASUREMENT_SIZE];  // Buffer con tamaño constante
+      int len = snprintf(singleMeasurement, SINGLE_MEASUREMENT_SIZE, 
+                        "{\"w\":%.1f,\"t\":%lu}", 
+                        offlineMeasurements[i].weight, 
+                        elapsedTime); // Usar tiempo transcurrido en lugar de timestamp absoluto
+      
+      // Verificar que el snprintf fue exitoso
+      if (len >= SINGLE_MEASUREMENT_SIZE) {
+        Serial.println("WARNING: Medida JSON truncada");
+        continue;
+      }
       
       // Verificar si cabe en el buffer actual
-      if (strlen(offlineDataString) + strlen(singleMeasurement) + 10 < 500) {
+      if (strlen(offlineDataString) + strlen(singleMeasurement) + 10 < MAX_JSON_BUFFER_SIZE) {
         // Añadir coma si no es el primer elemento
         if (i > 0) strcat(offlineDataString, ",");
         strcat(offlineDataString, singleMeasurement);
@@ -385,10 +396,11 @@ void initHX711(){
   // Siempre inicializar la báscula
   bascula.begin(pinData, pinClk);
   
-  // Esperar a que el HX711 esté listo
+  // Esperar a que el HX711 esté listo con timeout más robusto
   Serial.print("Esperando HX711");
   int attempts = 0;
-  while (!bascula.is_ready() && attempts < 50) {
+  const int MAX_ATTEMPTS = 50; // 5 segundos total
+  while (!bascula.is_ready() && attempts < MAX_ATTEMPTS) {
     delay(100);
     Serial.print(".");
     attempts++;
@@ -397,13 +409,19 @@ void initHX711(){
   
   if (!bascula.is_ready()) {
     Serial.println("ERROR: HX711 no responde después de 5 segundos");
+    Serial.println("Verificar conexiones: pinData=4, pinClk=2");
     return;
   }
   
   Serial.println("HX711 listo, configurando...");
   
-  // Configurar la escala
+  // Configurar la escala con verificación
   bascula.set_scale(factor_calibracion);
+  
+  // Verificar que la configuración fue exitosa
+  if (bascula.get_scale() != factor_calibracion) {
+    Serial.println("WARNING: Factor de calibración no se estableció correctamente");
+  }
   
   Serial.println("HX711 inicializado correctamente");
 }
@@ -447,12 +465,29 @@ void initHX711WithTare(){
 void initADXL345(){
   Serial.println("Iniciando el ADXL345...");
 
-  if (!accel.begin()) {
-    Serial.println("No se pudo encontrar el ADXL345");
-    return;
+  // Intentar inicializar con reintentos
+  int attempts = 0;
+  const int MAX_INIT_ATTEMPTS = 3;
+  
+  while (attempts < MAX_INIT_ATTEMPTS) {
+    if (accel.begin()) {
+      Serial.println("ADXL345 conectado correctamente");
+      
+      // Configurar para operación optimizada
+      accel.setRange(ADXL345_RANGE_2_G); // Rango mínimo para menor ruido
+      Serial.println("ADXL345 configurado con rango ±2g");
+      return;
+    }
+    
+    attempts++;
+    Serial.print("Intento ");
+    Serial.print(attempts);
+    Serial.println(" fallido, reintentando...");
+    delay(500);
   }
-
-  Serial.println("ADXL345 conectado correctamente");
+  
+  Serial.println("ERROR: No se pudo inicializar el ADXL345 después de 3 intentos");
+  Serial.println("Verificar conexiones I2C: SDA=21, SCL=22");
 }
 
 void readInclination() {
@@ -641,22 +676,30 @@ void loop() {
 
     // Notify weight reading - Sin timestamp para máxima compactación
     static char weightData[20];
-    sprintf(weightData, "{\"w\":%.1f}", peso);
-    weightCharacteristics.setValue(weightData);
-    weightCharacteristics.notify();
-    
-    Serial.print("Enviando peso JSON: ");
-    Serial.println(weightData);
+    int len = snprintf(weightData, sizeof(weightData), "{\"w\":%.1f}", peso);
+    if (len < sizeof(weightData)) {
+      weightCharacteristics.setValue(weightData);
+      weightCharacteristics.notify();
+      
+      Serial.print("Enviando peso JSON: ");
+      Serial.println(weightData);
+    } else {
+      Serial.println("ERROR: Buffer de peso insuficiente");
+    }
     
     // Notify inclination reading - Sin timestamp para máxima compactación
     static char inclinationData[30];
-    sprintf(inclinationData, "{\"p\":%.1f,\"r\":%.1f}", 
-            pitch, roll);
-    inclinationCharacteristics.setValue(inclinationData);
-    inclinationCharacteristics.notify();
-    
-    Serial.print("Enviando inclinación JSON: ");
-    Serial.println(inclinationData);
+    len = snprintf(inclinationData, sizeof(inclinationData), 
+                   "{\"p\":%.1f,\"r\":%.1f}", pitch, roll);
+    if (len < sizeof(inclinationData)) {
+      inclinationCharacteristics.setValue(inclinationData);
+      inclinationCharacteristics.notify();
+      
+      Serial.print("Enviando inclinación JSON: ");
+      Serial.println(inclinationData);
+    } else {
+      Serial.println("ERROR: Buffer de inclinación insuficiente");
+    }
     
     Serial.print("Datos en tiempo real - Peso: ");
     Serial.print(peso, 1);
