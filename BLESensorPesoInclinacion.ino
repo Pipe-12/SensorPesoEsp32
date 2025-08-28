@@ -146,8 +146,7 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
                     pCharacteristic->setValue("{\"w\":0.0}");
                 }
             } else {
-                Serial.println("\n❌ ERROR: HX711 no está listo después de reintentos, reinicializando...");
-                initHX711(); // Intentar reinicializar como último recurso
+                Serial.println("\n❌ ERROR: HX711 no está listo después de reintentos");
                 pCharacteristic->setValue("{\"w\":0.0}");
             }
         }
