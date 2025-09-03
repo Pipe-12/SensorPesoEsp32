@@ -502,7 +502,7 @@ void initADXL345(){
 
   if (!accel.begin()) {
     Serial.println("No se pudo encontrar el ADXL345");
-    while (1);
+    return;
   }
 
   accel.setRange(ADXL345_RANGE_2_G);
