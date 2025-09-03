@@ -7,6 +7,7 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
 #include <math.h>
+#include "esp_sleep.h"
 #include "esp_bt.h"
 #include "esp_wifi.h"
 #include "esp_task_wdt.h"
@@ -18,11 +19,6 @@
 #define LIGHT_SLEEP_TIME_CONNECTED 5 // 5 segundos cuando conectado
 #define CPU_FREQ_LOW 80 // MHz para bajo consumo
 #define CPU_FREQ_NORMAL 240 // MHz para operación normal
-
-// Configuración del ADXL345 para control de energía
-#define ADXL345_REG_POWER_CTL 0x2D
-#define ADXL345_POWER_STANDBY 0x00
-#define ADXL345_POWER_MEASURE 0x08
 
 // Configuración de timeouts y reintentos
 #define HX711_READY_TIMEOUT_MS 5000
@@ -278,18 +274,14 @@ void resetOfflineSystem() {
 
 // Funciones de gestión de energía mejoradas
 void powerDownSensors() {
-  // Poner ADXL345 en modo standby para ahorrar energía
-  accel.writeRegister(ADXL345_REG_POWER_CTL, ADXL345_POWER_STANDBY);
-  Serial.println("Sensores en modo ahorro de energía (ADXL345 en standby)");
+  Serial.println("Sensores en modo ahorro de energía");
 }
 
 void powerUpSensors() {
   if (!sensorsInitialized) {
     initSensors();
   } else {
-    // Despertar ADXL345 del standby
-    accel.writeRegister(ADXL345_REG_POWER_CTL, ADXL345_POWER_MEASURE);
-    Serial.println("Sensores activados (ADXL345 en modo medición)");
+    Serial.println("Sensores activados");
   }
 }
 
@@ -513,9 +505,9 @@ void initADXL345(){
     return;
   }
 
-  // Configurar el ADXL345 en modo de medición
-  accel.writeRegister(ADXL345_REG_POWER_CTL, ADXL345_POWER_MEASURE);
-  Serial.println("ADXL345 conectado correctamente y configurado en modo medición");
+  accel.setRange(ADXL345_RANGE_2_G);
+  
+  Serial.println("ADXL345 conectado correctamente");
 }
 
 void readInclination() {
@@ -527,7 +519,7 @@ void readInclination() {
   float y = event.acceleration.y;
   float z = event.acceleration.z;
 
-  // Calcular el pitch y roll
+  // Calcular el pitch y roll 
   pitch = atan2(y, sqrt(x * x + z * z)) * 180.0 / PI;
   roll = atan2(-x, sqrt(y * y + z * z)) * 180.0 / PI;
 
