@@ -519,7 +519,7 @@ void readInclination() {
   float y = event.acceleration.y;
   float z = event.acceleration.z;
 
-  // Calcular el pitch y roll (usar la misma fórmula que el ejemplo funcional)
+  // Calcular el pitch y roll 
   pitch = atan2(y, sqrt(x * x + z * z)) * 180.0 / PI;
   roll = atan2(-x, sqrt(y * y + z * z)) * 180.0 / PI;
 
