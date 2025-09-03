@@ -7,6 +7,7 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
 #include <math.h>
+#include "esp_sleep.h"
 #include "esp_bt.h"
 #include "esp_wifi.h"
 #include "esp_task_wdt.h"
@@ -279,7 +280,7 @@ void resetOfflineSystem() {
 // Funciones de gestión de energía mejoradas
 void powerDownSensors() {
   // Poner ADXL345 en modo standby para ahorrar energía
-  accel.writeRegister(ADXL345_REG_POWER_CTL, ADXL345_POWER_STANDBY);
+  accel.writeRegister(ADXL345_REG_POWER_CTL, 0x00); // Standby mode
   Serial.println("Sensores en modo ahorro de energía (ADXL345 en standby)");
 }
 
@@ -288,7 +289,7 @@ void powerUpSensors() {
     initSensors();
   } else {
     // Despertar ADXL345 del standby
-    accel.writeRegister(ADXL345_REG_POWER_CTL, ADXL345_POWER_MEASURE);
+    accel.writeRegister(ADXL345_REG_POWER_CTL, 0x08); // Measurement mode
     Serial.println("Sensores activados (ADXL345 en modo medición)");
   }
 }
@@ -514,7 +515,7 @@ void initADXL345(){
 
   if (!accel.begin()) {
     Serial.println("No se pudo encontrar el ADXL345");
-    return;
+    while (1);
   }
 
   // Configurar ADXL345 para bajo consumo
@@ -522,7 +523,7 @@ void initADXL345(){
   accel.setDataRate(ADXL345_DATARATE_12_5_HZ); // Frecuencia baja
   
   // Configurar el ADXL345 en modo de medición
-  accel.writeRegister(ADXL345_REG_POWER_CTL, ADXL345_POWER_MEASURE);
+  accel.writeRegister(ADXL345_REG_POWER_CTL, 0x08); // Measurement mode
   Serial.println("ADXL345 conectado correctamente y configurado en modo medición");
 }
 
