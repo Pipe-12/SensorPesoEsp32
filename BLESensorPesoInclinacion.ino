@@ -506,6 +506,10 @@ void initHX711WithTare(){
 }
 
 void initADXL345(){
+  // Inicializar I2C con frecuencia reducida para ahorrar energía
+  Wire.begin(21, 22);
+  Wire.setClock(100000); // 100kHz en lugar de 400kHz por defecto
+
   Serial.println("Iniciando el ADXL345...");
 
   if (!accel.begin()) {
@@ -513,6 +517,10 @@ void initADXL345(){
     return;
   }
 
+  // Configurar ADXL345 para bajo consumo
+  accel.setRange(ADXL345_RANGE_2_G); // Rango mínimo para menor consumo
+  accel.setDataRate(ADXL345_DATARATE_12_5_HZ); // Frecuencia baja
+  
   // Configurar el ADXL345 en modo de medición
   accel.writeRegister(ADXL345_REG_POWER_CTL, ADXL345_POWER_MEASURE);
   Serial.println("ADXL345 conectado correctamente y configurado en modo medición");
