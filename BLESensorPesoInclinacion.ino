@@ -20,11 +20,6 @@
 #define CPU_FREQ_LOW 80 // MHz para bajo consumo
 #define CPU_FREQ_NORMAL 240 // MHz para operación normal
 
-// Configuración del ADXL345 para control de energía
-#define ADXL345_REG_POWER_CTL 0x2D
-#define ADXL345_POWER_STANDBY 0x00
-#define ADXL345_POWER_MEASURE 0x08
-
 // Configuración de timeouts y reintentos
 #define HX711_READY_TIMEOUT_MS 5000
 #define HX711_READY_ATTEMPTS 50
@@ -279,18 +274,14 @@ void resetOfflineSystem() {
 
 // Funciones de gestión de energía mejoradas
 void powerDownSensors() {
-  // Poner ADXL345 en modo standby para ahorrar energía
-  accel.writeRegister(ADXL345_REG_POWER_CTL, 0x00); // Standby mode
-  Serial.println("Sensores en modo ahorro de energía (ADXL345 en standby)");
+  Serial.println("Sensores en modo ahorro de energía");
 }
 
 void powerUpSensors() {
   if (!sensorsInitialized) {
     initSensors();
   } else {
-    // Despertar ADXL345 del standby
-    accel.writeRegister(ADXL345_REG_POWER_CTL, 0x08); // Measurement mode
-    Serial.println("Sensores activados (ADXL345 en modo medición)");
+    Serial.println("Sensores activados");
   }
 }
 
@@ -507,10 +498,6 @@ void initHX711WithTare(){
 }
 
 void initADXL345(){
-  // Inicializar I2C con frecuencia reducida para ahorrar energía
-  Wire.begin(21, 22);
-  Wire.setClock(100000); // 100kHz en lugar de 400kHz por defecto
-
   Serial.println("Iniciando el ADXL345...");
 
   if (!accel.begin()) {
@@ -518,13 +505,9 @@ void initADXL345(){
     while (1);
   }
 
-  // Configurar ADXL345 para bajo consumo
-  accel.setRange(ADXL345_RANGE_2_G); // Rango mínimo para menor consumo
-  accel.setDataRate(ADXL345_DATARATE_12_5_HZ); // Frecuencia baja
+  accel.setRange(ADXL345_RANGE_2_G);
   
-  // Configurar el ADXL345 en modo de medición
-  accel.writeRegister(ADXL345_REG_POWER_CTL, 0x08); // Measurement mode
-  Serial.println("ADXL345 conectado correctamente y configurado en modo medición");
+  Serial.println("ADXL345 conectado correctamente");
 }
 
 void readInclination() {
@@ -536,9 +519,9 @@ void readInclination() {
   float y = event.acceleration.y;
   float z = event.acceleration.z;
 
-  // Calcular el pitch y roll
-  pitch = atan2(y, sqrt(x * x + z * z)) * 180.0 / PI;
-  roll = atan2(-x, sqrt(y * y + z * z)) * 180.0 / PI;
+  // Calcular el pitch y roll (usar la misma fórmula que el ejemplo funcional)
+  pitch = atan2(x, sqrt(y * y + z * z)) * 180.0 / PI;
+  roll = atan2(y, sqrt(x * x + z * z)) * 180.0 / PI;
 
   // Debug: Mostrar valores
   Serial.print("Valores crudos ADXL345 - X: ");
