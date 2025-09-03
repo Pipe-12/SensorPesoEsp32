@@ -520,8 +520,8 @@ void readInclination() {
   float z = event.acceleration.z;
 
   // Calcular el pitch y roll (usar la misma fórmula que el ejemplo funcional)
-  pitch = atan2(x, sqrt(y * y + z * z)) * 180.0 / PI;
-  roll = atan2(y, sqrt(x * x + z * z)) * 180.0 / PI;
+  pitch = atan2(y, sqrt(x * x + z * z)) * 180.0 / PI;
+  roll = atan2(-x, sqrt(y * y + z * z)) * 180.0 / PI;
 
   // Debug: Mostrar valores
   Serial.print("Valores crudos ADXL345 - X: ");
